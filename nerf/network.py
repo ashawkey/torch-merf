@@ -27,10 +27,11 @@ class MLP(nn.Module):
                 x = F.relu(x, inplace=True)
         return x
 
+
 class HashEncoder(nn.Module):
     def __init__(self, input_dim=3, level_dim=2, num_levels=16, log2_hashmap_size=19, desired_resolution=512, output_dim=8, num_layers=2, hidden_dim=64):
         super().__init__()
-        self.encoder, self.in_dim = get_encoder("hashgrid", input_dim=input_dim, level_dim=level_dim, num_levels=num_levels, log2_hashmap_size=log2_hashmap_size, desired_resolution=desired_resolution)
+        self.encoder, self.in_dim = get_encoder("tiledgrid", input_dim=input_dim, level_dim=level_dim, num_levels=num_levels, log2_hashmap_size=log2_hashmap_size, desired_resolution=desired_resolution, interpolation='smoothstep')
         self.mlp = MLP(self.in_dim, output_dim, hidden_dim, num_layers, bias=False)
     
     def forward(self, x, bound):
@@ -39,6 +40,18 @@ class HashEncoder(nn.Module):
     def grad_total_variation(self, lambda_tv):
         self.encoder.grad_total_variation(lambda_tv)
 
+class DenseEncoder(nn.Module):
+    def __init__(self, input_dim=3, output_dim=8, resolution=64):
+        super().__init__()
+        self.output_dim = output_dim
+        self.grid = nn.Parameter(torch.zeros([1, output_dim] + [resolution] * 3))
+    
+    def forward(self, x, bound):
+        shape = x.shape[:-1]
+        x = x / bound
+        out = F.grid_sample(self.grid, x.view(1, 1, 1, -1, 3).contiguous(), align_corners=True).view(self.output_dim, -1)
+        out = out.T.reshape(*shape, self.output_dim)
+        return out
 
 # MeRF like
 class NeRFNetwork(NeRFRenderer):
@@ -49,7 +62,8 @@ class NeRFNetwork(NeRFRenderer):
         super().__init__(opt)
 
         # grid
-        self.grid = HashEncoder(input_dim=3, level_dim=2, num_levels=16, log2_hashmap_size=19, desired_resolution=512, output_dim=8, num_layers=2, hidden_dim=64)
+        # self.grid = HashEncoder(input_dim=3, level_dim=2, num_levels=16, log2_hashmap_size=19, desired_resolution=512, output_dim=8, num_layers=2, hidden_dim=64)
+        self.grid = DenseEncoder(input_dim=3, output_dim=8, resolution=64)
 
         # triplane
         # NOTE: per encoder per MLP? or one MLP for all encoders?
@@ -85,8 +99,8 @@ class NeRFNetwork(NeRFRenderer):
                   self.planeYZ(x[..., [1, 2]], self.bound) + \
                   self.planeXZ(x[..., [0, 2]], self.bound)
 
-        # f = f_grid + f_plane
-        f = f_plane
+        f = f_grid + f_plane
+        # f = f_plane
 
         sigma = trunc_exp(f[..., 0] - 1)
         diffuse = torch.sigmoid(f[..., 1:4])
@@ -133,7 +147,8 @@ class NeRFNetwork(NeRFRenderer):
         }
     
     def apply_total_variation(self, lambda_tv):
-        self.grid.grad_total_variation(lambda_tv)
+        pass
+        # self.grid.grad_total_variation(lambda_tv)
         # self.planeXY.grad_total_variation(lambda_tv)
         # self.planeXZ.grad_total_variation(lambda_tv)
         # self.planeYZ.grad_total_variation(lambda_tv)

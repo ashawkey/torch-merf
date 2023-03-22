@@ -460,6 +460,7 @@ class NeRFRenderer(nn.Module):
            results['xyzs'] = xyzs # [N, T, 3] in [-2, 2]
            results['weights'] = weights # [N, T]
            results['alphas'] = alphas # [N, T]
+           results['rgbs'] = rgbs # [N, T, 3]
            return results
 
         # composite

@@ -38,7 +38,16 @@ def custom_meshgrid(*args):
 def plot_pointcloud(pc, color=None):
     # pc: [N, 3]
     # color: [N, 3/4]
+
     print('[visualize points]', pc.shape, pc.dtype, pc.min(0), pc.max(0))
+
+    # import open3d as o3d
+    # pcd = o3d.geometry.PointCloud()
+    # pcd.points = o3d.utility.Vector3dVector(pc)
+    # if color is not None:
+    #     pcd.colors = o3d.utility.Vector3dVector(color)
+    # o3d.visualization.draw_geometries([pcd])
+
     pc = trimesh.PointCloud(pc, color)
     # axis
     axes = trimesh.creation.axis(axis_length=4)
@@ -660,10 +669,14 @@ class Trainer(object):
             xyzs = outputs['xyzs'].reshape(-1, 3).cpu()
             weights = outputs['weights'].reshape(-1).cpu()
             alphas = outputs['alphas'].reshape(-1).cpu()
+            rgbs = outputs['rgbs'].reshape(-1, 3).cpu()
 
             # thresholding
             mask = (weights > thresh) & (alphas > thresh)
             xyzs = xyzs[mask] # [N, 3] in [-2, 2]
+            rgbs = rgbs[mask]
+
+            # plot_pointcloud(xyzs.numpy(), rgbs.numpy())
 
             # mark occupancy
             coords = torch.floor((xyzs + bound) / (2 * bound) * LS).long().clamp(0, LS - 1) # [N, 3]
@@ -704,7 +717,21 @@ class Trainer(object):
         scene_params['atlas_blocks_z'] = atlas_blocks_z
 
         atlas_indices = 255 * torch.ones([AS, AS, AS, 3], dtype=torch.long) # [64, 64, 64, 3]
-        atlas_data = torch.zeros([atlas_width, atlas_height, atlas_depth, 8], dtype=torch.float32) # [D, H, W, 3]
+        atlas_data = torch.zeros([atlas_width, atlas_height, atlas_depth, 8], dtype=torch.float32) # [W, H, D, 8]
+
+        # tmp debug
+        # atlas_data[..., 0] = 14
+        # colors = [
+        #     torch.tensor([7, 0, 0], dtype=torch.float32),
+        #     torch.tensor([0, 7, 0], dtype=torch.float32),
+        #     torch.tensor([0, 0, 7], dtype=torch.float32),
+        # ]
+        # n = 0
+        # for i in range(atlas_blocks_x):
+        #     for j in range(atlas_blocks_y):
+        #         for k in range(atlas_blocks_z):
+        #             atlas_data[i*9:(i+1)*9, j*9:(j+1)*9, k*9:(k+1)*9, 1:4] = colors[n % 3]
+        #             n += 1
 
         # grid indice
         indices = torch.arange(N_occ)
@@ -724,17 +751,25 @@ class Trainer(object):
         xyzs_000 = (coords / AS) * 2 * bound - bound # [N, 3], left-top point of the 9x9x9 block
         grid_size = 2 * bound / AS
         step_size = grid_size / BS
-
+        
         # loops
         for i in range(BS + 1):
             for j in range(BS + 1):
                 for k in range(BS + 1):
                     # print(f'[INFO] baking features for grid ({i}, {j}, {k})...')
                     xyzs = (xyzs_000 + torch.tensor([i, j, k], dtype=torch.float32) * step_size).to(device) # [N, 3]
-                    # query features
-                    f_grid = self.model.grid(xyzs, self.model.bound).cpu()
+
+                    # query features (multiple times)
+                    f = 0
+                    for _ in range(16):
+                        xyzs_jittor = xyzs + (torch.rand_like(xyzs) - 0.5) * step_size
+                        f += self.model.grid(xyzs_jittor, self.model.bound).cpu()
+                    f /= 16
+
+                    # plot_pointcloud(xyzs.cpu().numpy(), torch.sigmoid(f[..., 1:4]).numpy())
+
                     # place in grid
-                    atlas_data[indices_w * (BS + 1) + i, indices_h * (BS + 1) + j, indices_d * (BS + 1) + k] = f_grid
+                    atlas_data[indices_w * (BS + 1) + i, indices_h * (BS + 1) + j, indices_d * (BS + 1) + k] = f
 
         # triplane features
         triplane_data = torch.zeros([3, HS, HS, 8], dtype=torch.float32) # [3, 2048, 2048, 8]
@@ -754,10 +789,10 @@ class Trainer(object):
                 for k in range(HBS):
                     xyzs = (xyzs_000 + torch.tensor([i, j, k], dtype=torch.float32) * step_size).to(device) # [N, 3]
                     # query features
-                    with torch.no_grad():
-                        f_plane_01 = self.model.planeXY(xyzs[..., [0, 1]], self.model.bound).cpu()
-                        f_plane_12 = self.model.planeYZ(xyzs[..., [1, 2]], self.model.bound).cpu()
-                        f_plane_02 = self.model.planeXZ(xyzs[..., [0, 2]], self.model.bound).cpu()
+                    f_plane_01 = self.model.planeXY(xyzs[..., [0, 1]], self.model.bound).cpu()
+                    f_plane_12 = self.model.planeYZ(xyzs[..., [1, 2]], self.model.bound).cpu()
+                    f_plane_02 = self.model.planeXZ(xyzs[..., [0, 2]], self.model.bound).cpu()
+
                     # triplane indices
                     triplane_indices = torch.floor((xyzs + bound) / (2 * bound) * HS).long().clamp(0, HS - 1) # [N, 3]
                     triplane_data[0, triplane_indices[:, 0], triplane_indices[:, 1]] = f_plane_01
@@ -786,6 +821,9 @@ class Trainer(object):
         # feature_xxx.png & rgba_xxx.png
         for i in range(atlas_depth):
             density = 255 * (atlas_data[..., i, :1] + Q_density) / (2 * Q_density) # [atlas_height, atlas_width, 1]
+
+            # density = 255 * torch.ones_like(density)
+
             rgb = 255 * (atlas_data[..., i, 1:4] + Q_feature) / (2 * Q_feature)
             rgb_and_density = torch.cat([rgb, density], dim=-1) # they place density after rgb...
             feature = 255 * (atlas_data[..., i, 4:] + Q_feature) / (2 * Q_feature)
