@@ -193,160 +193,155 @@ class NeRFRenderer(nn.Module):
         self.aabb_infer = self.aabb_train.clone()
         print(f'[INFO] update_aabb: {self.aabb_train.cpu().numpy().tolist()}')
 
-    @torch.no_grad()
-    def export_mesh(self, save_path, resolution=None, decimate_target=1e5, dataset=None, S=128):
+    # @torch.no_grad()
+    # def export_baking(self, save_path, dataset, S=128):
 
-        # only for the inner mesh inside [-1, 1]
-        if resolution is None:
-            resolution = self.grid_size
-
-        device = self.aabb_train.device
-
-        if self.cuda_ray:
-            density_thresh = min(self.mean_density, self.density_thresh)
-        else:
-            density_thresh = self.density_thresh
-
-        # sigmas = np.zeros([resolution] * 3, dtype=np.float32)
-        sigmas = torch.zeros([resolution] * 3, dtype=torch.float32, device=device)
-
-        # query
-        X = torch.linspace(-1, 1, resolution).split(S)
-        Y = torch.linspace(-1, 1, resolution).split(S)
-        Z = torch.linspace(-1, 1, resolution).split(S)
-
-        for xi, xs in enumerate(X):
-            for yi, ys in enumerate(Y):
-                for zi, zs in enumerate(Z):
-                    xx, yy, zz = custom_meshgrid(xs, ys, zs)
-                    pts = torch.cat([xx.reshape(-1, 1), yy.reshape(-1, 1), zz.reshape(-1, 1)], dim=-1) # [S, 3]
-                    with torch.cuda.amp.autocast(enabled=self.opt.fp16):
-                        val = self.density(pts.to(device))['sigma'].reshape(len(xs), len(ys), len(zs)) # [S, 1] --> [x, y, z]
-                    sigmas[xi * S: xi * S + len(xs), yi * S: yi * S + len(ys), zi * S: zi * S + len(zs)] = val
-
-        # use the density_grid as a baseline mask (also excluding untrained regions)
-        if self.cuda_ray:
-            mask = torch.zeros([self.grid_size] * 3, dtype=torch.float32, device=device)
-            all_indices = torch.arange(self.grid_size**3, device=device, dtype=torch.int)
-            all_coords = raymarching.morton3D_invert(all_indices).long()
-            mask[tuple(all_coords.T)] = self.density_grid[0]
-            mask = F.interpolate(mask.unsqueeze(0).unsqueeze(0), size=[resolution] * 3, mode='nearest').squeeze(0).squeeze(0)
-            mask = (mask > density_thresh)
-            sigmas = sigmas * mask
-
-        sigmas = torch.nan_to_num(sigmas, 0)
-        sigmas = sigmas.cpu().numpy()
-
-        vertices, triangles = mcubes.marching_cubes(sigmas, density_thresh)
-
-        vertices = vertices / (resolution - 1.0) * 2 - 1
-        vertices = vertices.astype(np.float32)
-        triangles = triangles.astype(np.int32)
-
-        ### visibility test.
-        if dataset is not None:
-            visibility_mask = self.mark_unseen_triangles(vertices, triangles, dataset.mvps, dataset.H, dataset.W).cpu().numpy()
-            vertices, triangles = remove_masked_trigs(vertices, triangles, visibility_mask, dilation=self.opt.visibility_mask_dilation)
-
-        ### reduce floaters by post-processing...
-        vertices, triangles = clean_mesh(vertices, triangles, min_f=self.opt.clean_min_f, min_d=self.opt.clean_min_d, repair=True, remesh=False)
         
-        ### decimation
-        if decimate_target > 0 and triangles.shape[0] > decimate_target:
-            vertices, triangles = decimate_mesh(vertices, triangles, decimate_target)
 
-        mesh = trimesh.Trimesh(vertices, triangles, process=False)
-        mesh.export(os.path.join(save_path, f'mesh_0.ply'))
+    #     # query all cameras in dataset
 
-        # for the outer mesh [1, inf]
-        if self.bound > 1:
+    #     ############################################
 
-            reso = self.grid_size
-            target_reso = self.opt.env_reso
-            decimate_target //= 2 # empirical...
+    #     # sigmas = np.zeros([resolution] * 3, dtype=np.float32)
+    #     sigmas = torch.zeros([resolution] * 3, dtype=torch.float32, device=device)
 
-            if self.cuda_ray:
-                all_indices = torch.arange(reso**3, device=device, dtype=torch.int)
-                all_coords = raymarching.morton3D_invert(all_indices).cpu().numpy()
+    #     # query
+    #     X = torch.linspace(-1, 1, resolution).split(S)
+    #     Y = torch.linspace(-1, 1, resolution).split(S)
+    #     Z = torch.linspace(-1, 1, resolution).split(S)
 
-            # for each cas >= 1
-            for cas in range(1, self.cascade):
-                bound = min(2 ** cas, self.bound)
-                half_grid_size = bound / target_reso
+    #     for xi, xs in enumerate(X):
+    #         for yi, ys in enumerate(Y):
+    #             for zi, zs in enumerate(Z):
+    #                 xx, yy, zz = custom_meshgrid(xs, ys, zs)
+    #                 pts = torch.cat([xx.reshape(-1, 1), yy.reshape(-1, 1), zz.reshape(-1, 1)], dim=-1) # [S, 3]
+    #                 with torch.cuda.amp.autocast(enabled=self.opt.fp16):
+    #                     val = self.density(pts.to(device))['sigma'].reshape(len(xs), len(ys), len(zs)) # [S, 1] --> [x, y, z]
+    #                 sigmas[xi * S: xi * S + len(xs), yi * S: yi * S + len(ys), zi * S: zi * S + len(zs)] = val
 
-                # remap from density_grid
-                occ = torch.zeros([reso] * 3, dtype=torch.float32, device=device)
-                if self.cuda_ray:
-                    occ[tuple(all_coords.T)] = self.density_grid[cas]
-                else:
-                    # query
-                    X = torch.linspace(-bound, bound, reso).split(S)
-                    Y = torch.linspace(-bound, bound, reso).split(S)
-                    Z = torch.linspace(-bound, bound, reso).split(S)
+    #     # use the density_grid as a baseline mask (also excluding untrained regions)
+    #     if self.cuda_ray:
+    #         mask = torch.zeros([self.grid_size] * 3, dtype=torch.float32, device=device)
+    #         all_indices = torch.arange(self.grid_size**3, device=device, dtype=torch.int)
+    #         all_coords = raymarching.morton3D_invert(all_indices).long()
+    #         mask[tuple(all_coords.T)] = self.density_grid[0]
+    #         mask = F.interpolate(mask.unsqueeze(0).unsqueeze(0), size=[resolution] * 3, mode='nearest').squeeze(0).squeeze(0)
+    #         mask = (mask > density_thresh)
+    #         sigmas = sigmas * mask
 
-                    for xi, xs in enumerate(X):
-                        for yi, ys in enumerate(Y):
-                            for zi, zs in enumerate(Z):
-                                xx, yy, zz = custom_meshgrid(xs, ys, zs)
-                                pts = torch.cat([xx.reshape(-1, 1), yy.reshape(-1, 1), zz.reshape(-1, 1)], dim=-1) # [S, 3]
-                                with torch.cuda.amp.autocast(enabled=self.opt.fp16):
-                                    val = self.density(pts.to(device))['sigma'].reshape(len(xs), len(ys), len(zs)) # [S, 1] --> [x, y, z]
-                                occ[xi * S: xi * S + len(xs), yi * S: yi * S + len(ys), zi * S: zi * S + len(zs)] = val
+    #     sigmas = torch.nan_to_num(sigmas, 0)
+    #     sigmas = sigmas.cpu().numpy()
 
-                # interpolate the occ grid to desired resolution to control mesh size...
-                occ = F.interpolate(occ.unsqueeze(0).unsqueeze(0), [target_reso] * 3, mode='trilinear').squeeze(0).squeeze(0)
-                occ = torch.nan_to_num(occ, 0)
-                occ = (occ > density_thresh).cpu().numpy()
+    #     vertices, triangles = mcubes.marching_cubes(sigmas, density_thresh)
 
-                vertices_out, triangles_out = mcubes.marching_cubes(occ, 0.5)
+    #     vertices = vertices / (resolution - 1.0) * 2 - 1
+    #     vertices = vertices.astype(np.float32)
+    #     triangles = triangles.astype(np.int32)
 
-                vertices_out = vertices_out / (target_reso - 1.0) * 2 - 1 # range in [-1, 1]
+    #     ### visibility test.
+    #     if dataset is not None:
+    #         visibility_mask = self.mark_unseen_triangles(vertices, triangles, dataset.mvps, dataset.H, dataset.W).cpu().numpy()
+    #         vertices, triangles = remove_masked_trigs(vertices, triangles, visibility_mask, dilation=self.opt.visibility_mask_dilation)
 
-                # remove the center (already covered by previous cascades)
-                _r = 0.45
-                vertices_out, triangles_out = remove_selected_verts(vertices_out, triangles_out, f'(x <= {_r}) && (x >= -{_r}) && (y <= {_r}) && (y >= -{_r}) && (z <= {_r} ) && (z >= -{_r})')
-
-                if vertices_out.shape[0] == 0: 
-                    print(f'[WARN] empty mesh at cas {cas}, consider reducing --bound')
-                    continue
-
-                vertices_out = vertices_out * (bound - half_grid_size)
-
-                # remove the out-of-AABB region
-                xmn, ymn, zmn, xmx, ymx, zmx = self.aabb_train.cpu().numpy().tolist()
-                xmn += half_grid_size
-                ymn += half_grid_size
-                zmn += half_grid_size
-                xmx -= half_grid_size
-                ymx -= half_grid_size
-                zmx -= half_grid_size
-                vertices_out, triangles_out = remove_selected_verts(vertices_out, triangles_out, f'(x <= {xmn}) || (x >= {xmx}) || (y <= {ymn}) || (y >= {ymx}) || (z <= {zmn} ) || (z >= {zmx})')
-
-                # clean mesh
-                vertices_out, triangles_out = clean_mesh(vertices_out, triangles_out, min_f=self.opt.clean_min_f, min_d=self.opt.clean_min_d, repair=False, remesh=False)
-
-                if vertices_out.shape[0] == 0: 
-                    print(f'[WARN] empty mesh at cas {cas}, consider reducing --bound')
-                    continue
-
-                # decimate
-                if decimate_target > 0 and triangles_out.shape[0] > decimate_target:
-                    vertices_out, triangles_out = decimate_mesh(vertices_out, triangles_out, decimate_target, optimalplacement=False)
-
-                vertices_out = vertices_out.astype(np.float32)
-                triangles_out = triangles_out.astype(np.int32)
-
-                print(f'[INFO] exporting outer mesh at cas {cas}, v = {vertices_out.shape}, f = {triangles_out.shape}')
+    #     ### reduce floaters by post-processing...
+    #     vertices, triangles = clean_mesh(vertices, triangles, min_f=self.opt.clean_min_f, min_d=self.opt.clean_min_d, repair=True, remesh=False)
         
-                if dataset is not None:
-                    visibility_mask = self.mark_unseen_triangles(vertices_out, triangles_out, dataset.mvps, dataset.H, dataset.W).cpu().numpy()
-                    vertices_out, triangles_out = remove_masked_trigs(vertices_out, triangles_out, visibility_mask, dilation=self.opt.visibility_mask_dilation)
+    #     ### decimation
+    #     if decimate_target > 0 and triangles.shape[0] > decimate_target:
+    #         vertices, triangles = decimate_mesh(vertices, triangles, decimate_target)
+
+    #     mesh = trimesh.Trimesh(vertices, triangles, process=False)
+    #     mesh.export(os.path.join(save_path, f'mesh_0.ply'))
+
+    #     # for the outer mesh [1, inf]
+    #     if self.bound > 1:
+
+    #         reso = self.grid_size
+    #         target_reso = self.opt.env_reso
+    #         decimate_target //= 2 # empirical...
+
+    #         if self.cuda_ray:
+    #             all_indices = torch.arange(reso**3, device=device, dtype=torch.int)
+    #             all_coords = raymarching.morton3D_invert(all_indices).cpu().numpy()
+
+    #         # for each cas >= 1
+    #         for cas in range(1, self.cascade):
+    #             bound = min(2 ** cas, self.bound)
+    #             half_grid_size = bound / target_reso
+
+    #             # remap from density_grid
+    #             occ = torch.zeros([reso] * 3, dtype=torch.float32, device=device)
+    #             if self.cuda_ray:
+    #                 occ[tuple(all_coords.T)] = self.density_grid[cas]
+    #             else:
+    #                 # query
+    #                 X = torch.linspace(-bound, bound, reso).split(S)
+    #                 Y = torch.linspace(-bound, bound, reso).split(S)
+    #                 Z = torch.linspace(-bound, bound, reso).split(S)
+
+    #                 for xi, xs in enumerate(X):
+    #                     for yi, ys in enumerate(Y):
+    #                         for zi, zs in enumerate(Z):
+    #                             xx, yy, zz = custom_meshgrid(xs, ys, zs)
+    #                             pts = torch.cat([xx.reshape(-1, 1), yy.reshape(-1, 1), zz.reshape(-1, 1)], dim=-1) # [S, 3]
+    #                             with torch.cuda.amp.autocast(enabled=self.opt.fp16):
+    #                                 val = self.density(pts.to(device))['sigma'].reshape(len(xs), len(ys), len(zs)) # [S, 1] --> [x, y, z]
+    #                             occ[xi * S: xi * S + len(xs), yi * S: yi * S + len(ys), zi * S: zi * S + len(zs)] = val
+
+    #             # interpolate the occ grid to desired resolution to control mesh size...
+    #             occ = F.interpolate(occ.unsqueeze(0).unsqueeze(0), [target_reso] * 3, mode='trilinear').squeeze(0).squeeze(0)
+    #             occ = torch.nan_to_num(occ, 0)
+    #             occ = (occ > density_thresh).cpu().numpy()
+
+    #             vertices_out, triangles_out = mcubes.marching_cubes(occ, 0.5)
+
+    #             vertices_out = vertices_out / (target_reso - 1.0) * 2 - 1 # range in [-1, 1]
+
+    #             # remove the center (already covered by previous cascades)
+    #             _r = 0.45
+    #             vertices_out, triangles_out = remove_selected_verts(vertices_out, triangles_out, f'(x <= {_r}) && (x >= -{_r}) && (y <= {_r}) && (y >= -{_r}) && (z <= {_r} ) && (z >= -{_r})')
+
+    #             if vertices_out.shape[0] == 0: 
+    #                 print(f'[WARN] empty mesh at cas {cas}, consider reducing --bound')
+    #                 continue
+
+    #             vertices_out = vertices_out * (bound - half_grid_size)
+
+    #             # remove the out-of-AABB region
+    #             xmn, ymn, zmn, xmx, ymx, zmx = self.aabb_train.cpu().numpy().tolist()
+    #             xmn += half_grid_size
+    #             ymn += half_grid_size
+    #             zmn += half_grid_size
+    #             xmx -= half_grid_size
+    #             ymx -= half_grid_size
+    #             zmx -= half_grid_size
+    #             vertices_out, triangles_out = remove_selected_verts(vertices_out, triangles_out, f'(x <= {xmn}) || (x >= {xmx}) || (y <= {ymn}) || (y >= {ymx}) || (z <= {zmn} ) || (z >= {zmx})')
+
+    #             # clean mesh
+    #             vertices_out, triangles_out = clean_mesh(vertices_out, triangles_out, min_f=self.opt.clean_min_f, min_d=self.opt.clean_min_d, repair=False, remesh=False)
+
+    #             if vertices_out.shape[0] == 0: 
+    #                 print(f'[WARN] empty mesh at cas {cas}, consider reducing --bound')
+    #                 continue
+
+    #             # decimate
+    #             if decimate_target > 0 and triangles_out.shape[0] > decimate_target:
+    #                 vertices_out, triangles_out = decimate_mesh(vertices_out, triangles_out, decimate_target, optimalplacement=False)
+
+    #             vertices_out = vertices_out.astype(np.float32)
+    #             triangles_out = triangles_out.astype(np.int32)
+
+    #             print(f'[INFO] exporting outer mesh at cas {cas}, v = {vertices_out.shape}, f = {triangles_out.shape}')
+        
+    #             if dataset is not None:
+    #                 visibility_mask = self.mark_unseen_triangles(vertices_out, triangles_out, dataset.mvps, dataset.H, dataset.W).cpu().numpy()
+    #                 vertices_out, triangles_out = remove_masked_trigs(vertices_out, triangles_out, visibility_mask, dilation=self.opt.visibility_mask_dilation)
                 
-                if self.opt.contract:
-                    vertices_out = uncontract(torch.from_numpy(vertices_out)).cpu().numpy()
+    #             if self.opt.contract:
+    #                 vertices_out = uncontract(torch.from_numpy(vertices_out)).cpu().numpy()
                 
-                mesh_out = trimesh.Trimesh(vertices_out, triangles_out, process=False) # important, process=True leads to seg fault...
-                mesh_out.export(os.path.join(save_path, f'mesh_{cas}.ply'))
+    #             mesh_out = trimesh.Trimesh(vertices_out, triangles_out, process=False) # important, process=True leads to seg fault...
+    #             mesh_out.export(os.path.join(save_path, f'mesh_{cas}.ply'))
 
     def render(self, rays_o, rays_d, **kwargs):
         
@@ -358,27 +353,20 @@ class NeRFRenderer(nn.Module):
             N = rays_o.shape[0]
             device = rays_o.device
 
-            depth = torch.empty((N), device=device)
-            image = torch.empty((N, 3), device=device)
-            weights_sum = torch.empty((N), device=device)
-
             head = 0
+            results = {}
             while head < N:
                 tail = min(head + self.opt.max_ray_batch, N)
                 results_ = self.run(rays_o[head:tail], rays_d[head:tail], **kwargs)
-                depth[head:tail] = results_['depth']
-                weights_sum[head:tail] = results_['weights_sum']
-                image[head:tail] = results_['image']
+                for k, v in results_.items():
+                    if k not in results:
+                        results[k] = torch.empty(N, *v.shape[1:], device=device)
+                    results[k][head:tail] = v
                 head += self.opt.max_ray_batch
-            
-            results = {}
-            results['depth'] = depth
-            results['image'] = image
-            results['weights_sum'] = weights_sum
 
             return results
 
-    def run(self, rays_o, rays_d, bg_color=None, perturb=False, cam_near_far=None, shading='full', update_proposal=True, **kwargs):
+    def run(self, rays_o, rays_d, bg_color=None, perturb=False, cam_near_far=None, shading='full', update_proposal=True, baking=False, **kwargs):
         # rays_o, rays_d: [N, 3]
         # return: image: [N, 3], depth: [N]
 
@@ -433,16 +421,18 @@ class NeRFRenderer(nn.Module):
             rays_t = (real_bins[..., 1:] + real_bins[..., :-1]) / 2 # [N, T]
 
             xyzs = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * rays_t.unsqueeze(2) # [N, T, 3]
+            if self.opt.contract:
+                xyzs = contract(xyzs)
             
             if prop_iter != len(self.opt.num_steps) - 1:
                 # query proposal density
                 with torch.set_grad_enabled(update_proposal):
-                    sigmas = self.density(xyzs if not self.opt.contract else contract(xyzs), proposal=prop_iter)['sigma'] # [N, T]
+                    sigmas = self.density(xyzs, proposal=prop_iter)['sigma'] # [N, T]
             else:
                 # last iter: query nerf
                 dirs = rays_d.view(-1, 1, 3).expand_as(xyzs) # [N, T, 3]
                 dirs = dirs / torch.norm(dirs, dim=-1, keepdim=True)
-                outputs = self(xyzs if not self.opt.contract else contract(xyzs), dirs, shading=shading)
+                outputs = self(xyzs, dirs, shading=shading)
                 sigmas = outputs['sigma']
                 rgbs = outputs['color']
 
@@ -466,6 +456,12 @@ class NeRFRenderer(nn.Module):
                 all_bins.append(bins)
                 all_weights.append(weights)
 
+        if baking:
+           results['xyzs'] = xyzs # [N, T, 3] in [-2, 2]
+           results['weights'] = weights # [N, T]
+           results['alphas'] = alphas # [N, T]
+           return results
+
         # composite
         weights_sum = torch.sum(weights, dim=-1) # [N]
         depth = torch.sum(weights * rays_t, dim=-1) # [N]
@@ -481,6 +477,7 @@ class NeRFRenderer(nn.Module):
             
             if self.opt.lambda_distort > 0:
                 results['distort_loss'] = distort_loss(bins, weights)
+        
 
         image = image + (1 - weights_sum).unsqueeze(-1) * bg_color
 

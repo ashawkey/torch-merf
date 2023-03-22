@@ -27,7 +27,20 @@ class MLP(nn.Module):
                 x = F.relu(x, inplace=True)
         return x
 
+class HashEncoder(nn.Module):
+    def __init__(self, input_dim=3, level_dim=2, num_levels=16, log2_hashmap_size=19, desired_resolution=512, output_dim=8, num_layers=2, hidden_dim=64):
+        super().__init__()
+        self.encoder, self.in_dim = get_encoder("hashgrid", input_dim=input_dim, level_dim=level_dim, num_levels=num_levels, log2_hashmap_size=log2_hashmap_size, desired_resolution=desired_resolution)
+        self.mlp = MLP(self.in_dim, output_dim, hidden_dim, num_layers, bias=False)
+    
+    def forward(self, x, bound):
+        return self.mlp(self.encoder(x, bound=bound))
 
+    def grad_total_variation(self, lambda_tv):
+        self.encoder.grad_total_variation(lambda_tv)
+
+
+# MeRF like
 class NeRFNetwork(NeRFRenderer):
     def __init__(self,
                  opt,
@@ -36,12 +49,17 @@ class NeRFNetwork(NeRFRenderer):
         super().__init__(opt)
 
         # grid
-        self.grid_encoder, self.grid_in_dim = get_encoder("hashgrid", input_dim=3, level_dim=2, num_levels=16, log2_hashmap_size=19, desired_resolution=2048 * self.bound)
-        self.grid_mlp = MLP(self.grid_in_dim, 1 + 15, 64, 3, bias=False)
+        self.grid = HashEncoder(input_dim=3, level_dim=2, num_levels=16, log2_hashmap_size=19, desired_resolution=512, output_dim=8, num_layers=2, hidden_dim=64)
+
+        # triplane
+        # NOTE: per encoder per MLP? or one MLP for all encoders?
+        self.planeXY = HashEncoder(input_dim=2, level_dim=2, num_levels=16, log2_hashmap_size=19, desired_resolution=2048, output_dim=8, num_layers=2, hidden_dim=64)
+        self.planeYZ = HashEncoder(input_dim=2, level_dim=2, num_levels=16, log2_hashmap_size=19, desired_resolution=2048, output_dim=8, num_layers=2, hidden_dim=64)
+        self.planeXZ = HashEncoder(input_dim=2, level_dim=2, num_levels=16, log2_hashmap_size=19, desired_resolution=2048, output_dim=8, num_layers=2, hidden_dim=64)
 
         # view-dependency
-        self.view_encoder, self.view_in_dim = get_encoder('sh', input_dim=3, degree=4)
-        self.view_mlp = MLP(15 + self.view_in_dim, 3, 32, 3, bias=False)
+        self.view_encoder, self.view_in_dim = get_encoder('frequency', input_dim=3, multires=4)
+        self.view_mlp = MLP(3 + 4 + self.view_in_dim, 3, 16, 3, bias=True)
 
         # proposal network
         if not self.opt.cuda_ray:
@@ -61,28 +79,43 @@ class NeRFNetwork(NeRFRenderer):
 
     def common_forward(self, x):
 
-        f = self.grid_encoder(x, bound=self.bound)
-        f = self.grid_mlp(f)
+        f_grid = self.grid(x, self.bound)
 
-        sigma = trunc_exp(f[..., 0])
-        feat = f[..., 1:]
-    
-        return sigma, feat
+        f_plane = self.planeXY(x[..., [0, 1]], self.bound) + \
+                  self.planeYZ(x[..., [1, 2]], self.bound) + \
+                  self.planeXZ(x[..., [0, 2]], self.bound)
 
-    def forward(self, x, d, **kwargs):
+        # f = f_grid + f_plane
+        f = f_plane
+
+        sigma = trunc_exp(f[..., 0] - 1)
+        diffuse = torch.sigmoid(f[..., 1:4])
+        f_specular = torch.sigmoid(f[..., 4:])
+
+        return sigma, diffuse, f_specular
+
+    def forward(self, x, d, shading='full'):
         # x: [N, 3], in [-bound, bound]
         # d: [N, 3], nomalized in [-1, 1]
-        
-        sigma, feat = self.common_forward(x)
+
+        sigma, diffuse, f_specular = self.common_forward(x)
 
         d = self.view_encoder(d)
-        
-        color = self.view_mlp(torch.cat([feat, d], dim=-1))
-        color = torch.sigmoid(color)
+        if shading == 'diffuse':
+            color = diffuse
+            specular = None
+        else: 
+            specular = self.view_mlp(torch.cat([diffuse, f_specular, d], dim=-1))
+            specular = torch.sigmoid(specular)
+            if shading == 'specular':
+                color = specular
+            else: # full
+                color = (specular + diffuse).clamp(0, 1) # specular + albedo
 
         return {
             'sigma': sigma,
             'color': color,
+            'specular': specular,
         }
 
 
@@ -90,17 +123,20 @@ class NeRFNetwork(NeRFRenderer):
 
         # proposal network
         if proposal >= 0 and proposal < len(self.prop_encoders):
-            sigma = trunc_exp(self.prop_mlp[proposal](self.prop_encoders[proposal](x, bound=self.bound)).squeeze(-1))
+            sigma = trunc_exp(self.prop_mlp[proposal](self.prop_encoders[proposal](x, bound=self.bound)).squeeze(-1) - 1)
         # final NeRF
         else:
-            sigma, _ = self.common_forward(x)
+            sigma, _, _ = self.common_forward(x)
 
         return {
             'sigma': sigma,
         }
     
     def apply_total_variation(self, lambda_tv):
-        self.grid_encoder.grad_total_variation(lambda_tv)
+        self.grid.grad_total_variation(lambda_tv)
+        # self.planeXY.grad_total_variation(lambda_tv)
+        # self.planeXZ.grad_total_variation(lambda_tv)
+        # self.planeYZ.grad_total_variation(lambda_tv)
 
     # optimizer utils
     def get_params(self, lr):
@@ -108,8 +144,10 @@ class NeRFNetwork(NeRFRenderer):
         params = []
 
         params.extend([
-            {'params': self.grid_encoder.parameters(), 'lr': lr},
-            {'params': self.grid_mlp.parameters(), 'lr': lr}, 
+            {'params': self.grid.parameters(), 'lr': lr},
+            {'params': self.planeXY.parameters(), 'lr': lr},
+            {'params': self.planeYZ.parameters(), 'lr': lr}, 
+            {'params': self.planeXZ.parameters(), 'lr': lr},
             {'params': self.view_mlp.parameters(), 'lr': lr}, 
         ])
 

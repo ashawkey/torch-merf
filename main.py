@@ -10,8 +10,8 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     parser.add_argument('path', type=str)
-    parser.add_argument('-O', action='store_true', help="recommended settings")
-    parser.add_argument('-O2', action='store_true', help="recommended settings")
+    # parser.add_argument('-O', action='store_true', help="recommended settings")
+    # parser.add_argument('-O2', action='store_true', help="recommended settings")
     parser.add_argument('--workspace', type=str, default='workspace')
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--ckpt', type=str, default='latest')
@@ -22,12 +22,13 @@ if __name__ == '__main__':
     parser.add_argument('--eval_cnt', type=int, default=10, help="perform validation for $ times during training")
     parser.add_argument('--test', action='store_true', help="test mode")
     parser.add_argument('--test_no_video', action='store_true', help="test mode: do not save video")
-    parser.add_argument('--test_no_mesh', action='store_true', help="test mode: do not save mesh")
+    parser.add_argument('--test_no_baking', action='store_true', help="test mode: do not save mesh")
     parser.add_argument('--camera_traj', type=str, default='interp', help="interp for interpolation, circle for circular camera")
 
     ### dataset options
     parser.add_argument('--data_format', type=str, default='colmap', choices=['nerf', 'colmap', 'dtu'])
-    parser.add_argument('--train_split', type=str, default='train', choices=['train', 'trainval', 'all'])
+    parser.add_argument('--train_split', type=str, default='all', choices=['train', 'all'])
+    parser.add_argument('--test_split', type=str, default='test', choices=['train', 'val', 'test'])
     parser.add_argument('--preload', action='store_true', help="preload all data into GPU, accelerate training but use more GPU memory")
     parser.add_argument('--random_image_batch', action='store_true', help="randomly sample rays from all images per step in training")
     parser.add_argument('--downscale', type=int, default=1, help="downscale training images")
@@ -36,8 +37,8 @@ if __name__ == '__main__':
     parser.add_argument('--offset', type=float, nargs='*', default=[0, 0, 0], help="offset of camera location")
     parser.add_argument('--enable_cam_near_far', action='store_true', help="colmap mode: use the sparse points to estimate camera near far per view.")
     parser.add_argument('--enable_cam_center', action='store_true', help="use camera center instead of sparse point center (colmap dataset only)")
-    parser.add_argument('--min_near', type=float, default=0.05, help="minimum near distance for camera")
-    parser.add_argument('--T_thresh', type=float, default=1e-4, help="minimum transmittance to continue ray marching")
+    parser.add_argument('--min_near', type=float, default=0.2, help="minimum near distance for camera")
+    parser.add_argument('--T_thresh', type=float, default=2e-4, help="minimum transmittance to continue ray marching")
 
     ### training options
     parser.add_argument('--iters', type=int, default=20000, help="training iters")
@@ -47,7 +48,6 @@ if __name__ == '__main__':
     parser.add_argument('--num_steps', type=int, nargs='*', default=[256, 96, 48], help="num steps sampled per ray for each proposal level (only valid when NOT using --cuda_ray)")
     parser.add_argument('--contract', action='store_true', help="apply spatial contraction as in mip-nerf 360, only work for bound > 1, will override bound to 2.")
     parser.add_argument('--background', type=str, default='last_sample', choices=['white', 'random', 'last_sample'], help="training background mode")
-    parser.add_argument('--backbone', type=str, default='ngp', choices=['ngp', 'merf'], help="network backbone")
 
     parser.add_argument('--update_extra_interval', type=int, default=16, help="iter interval to update extra status (only valid when using --cuda_ray)")
     parser.add_argument('--max_ray_batch', type=int, default=4096 * 4, help="batch size of rays at inference to avoid OOM (only valid when NOT using --cuda_ray)")
@@ -64,18 +64,9 @@ if __name__ == '__main__':
 
     # regularizations
     parser.add_argument('--lambda_entropy', type=float, default=0, help="loss scale")
-    parser.add_argument('--lambda_tv', type=float, default=1e-8, help="loss scale")
+    parser.add_argument('--lambda_tv', type=float, default=0, help="loss scale")
     parser.add_argument('--lambda_proposal', type=float, default=1, help="loss scale (only for non-cuda-ray mode)")
-    parser.add_argument('--lambda_distort', type=float, default=0.002, help="loss scale (only for non-cuda-ray mode)")
-
-    ### mesh options
-    parser.add_argument('--mcubes_reso', type=int, default=512, help="resolution for marching cubes")
-    parser.add_argument('--env_reso', type=int, default=256, help="max layers (resolution) for env mesh")
-    parser.add_argument('--decimate_target', type=int, default=3e5, help="decimate target for number of triangles, <=0 to disable")
-    parser.add_argument('--mesh_visibility_culling', action='store_true', help="cull mesh faces based on visibility in training dataset")
-    parser.add_argument('--visibility_mask_dilation', type=int, default=5, help="visibility dilation")
-    parser.add_argument('--clean_min_f', type=int, default=8, help="mesh clean: min face count for isolated mesh")
-    parser.add_argument('--clean_min_d', type=int, default=5, help="mesh clean: min diameter for isolated mesh")
+    parser.add_argument('--lambda_distort', type=float, default=0, help="loss scale (only for non-cuda-ray mode)")
 
     ### GUI options
     parser.add_argument('--vis_pose', action='store_true', help="visualize the poses")
@@ -88,21 +79,16 @@ if __name__ == '__main__':
 
     opt = parser.parse_args()
 
-    if opt.O:
-        opt.fp16 = True
-        opt.preload = True
-        opt.cuda_ray = True
-        opt.mark_untrained = True
-        opt.adaptive_num_rays = True
-        opt.random_image_batch = True
-    
-    if opt.O2:
-        opt.fp16 = True
-        opt.bound = 128 # large enough
-        opt.preload = True
-        opt.contract = True
-        opt.adaptive_num_rays = True
-        opt.random_image_batch = True
+    # assert O2 for MeRF
+    opt.fp16 = True
+    opt.bound = 128 # large enough
+    opt.preload = True
+    opt.contract = True
+    opt.adaptive_num_rays = True
+    opt.random_image_batch = True
+
+    assert not opt.cuda_ray
+    assert opt.contract
     
     if opt.contract:
         # mark untrained is not correct in contraction mode...
@@ -116,12 +102,8 @@ if __name__ == '__main__':
         from nerf.provider import NeRFDataset
     
     seed_everything(opt.seed)
-
-    if opt.backbone == 'merf':
-        from nerf.network_merf import NeRFNetwork
-    else:
-        from nerf.network import NeRFNetwork
-
+    
+    from nerf.network import NeRFNetwork
     model = NeRFNetwork(opt)
     
     # criterion = torch.nn.MSELoss(reduction='none')
@@ -139,7 +121,7 @@ if __name__ == '__main__':
         
         else:
             if not opt.test_no_video:
-                test_loader = NeRFDataset(opt, device=device, type='test').dataloader()
+                test_loader = NeRFDataset(opt, device=device, type=opt.test_split).dataloader()
 
                 if test_loader.has_gt:
                     trainer.metrics = [PSNRMeter(), SSIMMeter(), LPIPSMeter(device=device)] # set up metrics
@@ -147,11 +129,9 @@ if __name__ == '__main__':
 
                 trainer.test(test_loader, write_video=True) # test and save video
             
-            # if not opt.test_no_mesh:
-            #     # need train loader to get camera poses for visibility test
-            #     if opt.mesh_visibility_culling:
-            #         train_loader = NeRFDataset(opt, device=device, type=opt.train_split).dataloader()
-            #     trainer.save_mesh(resolution=opt.mcubes_reso, decimate_target=opt.decimate_target, dataset=train_loader._data if opt.mesh_visibility_culling else None)
+            if not opt.test_no_baking:    
+                all_loader = NeRFDataset(opt, device=device, type='all').dataloader()
+                trainer.save_baking(loader=all_loader)
         
     else:
         
@@ -168,7 +148,7 @@ if __name__ == '__main__':
         if not opt.contract and opt.data_format == 'colmap':
             model.update_aabb(train_loader._data.pts_aabb)
 
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda iter: 0.1 ** min(iter / opt.iters, 1))
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda iter: 0.1 ** ((iter - 100) / (opt.iters - 100)) if iter > 100 else 0.99 * (iter / 100) + 0.01)
 
         trainer = Trainer('ngp', opt, model, device=device, workspace=opt.workspace, optimizer=optimizer, criterion=criterion, ema_decay=0.95, fp16=opt.fp16, lr_scheduler=scheduler, scheduler_update_every_step=True, use_checkpoint=opt.ckpt, eval_interval=eval_interval, save_interval=save_interval)
 
@@ -187,10 +167,12 @@ if __name__ == '__main__':
             trainer.evaluate(valid_loader)
 
             # also test
-            test_loader = NeRFDataset(opt, device=device, type='test').dataloader()
+            test_loader = NeRFDataset(opt, device=device, type=opt.test_split).dataloader()
             
             if test_loader.has_gt:
                 trainer.evaluate(test_loader) # blender has gt, so evaluate it.
             
             trainer.test(test_loader, write_video=True) # test and save video
-            # trainer.save_mesh(resolution=opt.mcubes_reso, decimate_target=opt.decimate_target, dataset=train_loader._data if opt.mesh_visibility_culling else None)
+
+            all_loader = NeRFDataset(opt, device=device, type='all').dataloader()
+            trainer.save_baking(loader=all_loader)

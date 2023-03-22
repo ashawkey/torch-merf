@@ -109,7 +109,7 @@ class ColmapDataset:
         self.fp16 = opt.fp16 # if preload, load into fp16.
         self.root_path = opt.path # contains "colmap_sparse"
 
-        self.training = self.type in ['train', 'all', 'trainval']
+        self.training = self.type in ['train', 'all']
 
         # locate colmap dir
         candidate_paths = [
@@ -435,7 +435,6 @@ class ColmapDataset:
             if self.training:
                 C = self.images.shape[-1]
                 images = images.view(-1, C)
-
 
             results['images'] = images
         

@@ -8,6 +8,7 @@ import warnings
 import tensorboardX
 
 import numpy as np
+import json
 
 import time
 
@@ -595,21 +596,239 @@ class Trainer(object):
         pred_rgb = outputs['image'].reshape(H, W, 3)
         pred_depth = outputs['depth'].reshape(H, W)
 
-        return pred_rgb, pred_depth
+        return pred_rgb, pred_depth    
 
-
-    def save_mesh(self, save_path=None, resolution=128, decimate_target=1e5, dataset=None):
+    @torch.no_grad()
+    def save_baking(self, loader, save_path=None, name=None):
 
         if save_path is None:
-            save_path = os.path.join(self.workspace, 'mesh')
+            save_path = os.path.join(self.workspace, 'assets')
 
-        self.log(f"==> Saving mesh to {save_path}")
+        self.log(f"==> Saving assets to {save_path}")
 
         os.makedirs(save_path, exist_ok=True)
 
-        self.model.export_mesh(save_path, resolution=resolution, decimate_target=decimate_target, dataset=dataset)
+        self.log(f"==> Start Baking, save results to {save_path}")
 
-        self.log(f"==> Finished saving mesh.")
+        self.model.eval()
+
+        device = self.device
+
+        bound = self.model.bound # always 2
+        BS = 8 # block size
+        LS = 512
+        AS = LS // BS # 64, atlas size
+        HS = 2048
+        thresh = 0.005
+        Q_density = 14
+        Q_feature = 7
+
+        scene_params = {
+            "voxel_size": 2 * bound / LS, # 0.0078125 = 4 / 512
+            'block_size': BS,
+            'grid_width': LS,
+            'grid_height': LS,
+            'grid_depth': LS,
+            'slice_depth': 1,
+            'worldspace_T_opengl': [[-1, 0, 0, 0], [0, 0, 1, 0], [0, 1, 0, 0], [0, 0, 0, 1]],
+            'min_x': -bound,
+            'min_y': -bound,
+            'min_z': -bound,
+            "voxel_size_triplane": 2 * bound / HS, # 0.001953125 = 4 / 2048
+            "plane_width_0": HS,
+            "plane_height_0": HS,
+            "plane_width_1": HS,
+            "plane_height_1": HS,
+            "plane_width_2": HS,
+            "plane_height_2": HS,
+            "format": "png",
+        }
+
+        # covers the [-2, 2]^3 space?
+        occupancy_grid = torch.zeros([LS, LS, LS], dtype=torch.float32)
+
+        for i, data in enumerate(tqdm.tqdm(loader)):
+            
+            rays_o = data['rays_o'] # [N, 3]
+            rays_d = data['rays_d'] # [N, 3]
+            index = data['index'] # [1/N]
+            H, W = data['H'], data['W']
+            cam_near_far = data['cam_near_far'] if 'cam_near_far' in data else None # [1/N, 2] or None
+
+            outputs = self.model.render(rays_o, rays_d, index=index, bg_color=None, perturb=False, cam_near_far=cam_near_far, shading='diffuse', baking=True)
+
+            xyzs = outputs['xyzs'].reshape(-1, 3).cpu()
+            weights = outputs['weights'].reshape(-1).cpu()
+            alphas = outputs['alphas'].reshape(-1).cpu()
+
+            # thresholding
+            mask = (weights > thresh) & (alphas > thresh)
+            xyzs = xyzs[mask] # [N, 3] in [-2, 2]
+
+            # mark occupancy
+            coords = torch.floor((xyzs + bound) / (2 * bound) * LS).long().clamp(0, LS - 1) # [N, 3]
+            occupancy_grid[tuple(coords.T)] = 1
+        
+        print(f'[INFO] Occupancy rate: {(occupancy_grid > 0).sum().item() / occupancy_grid.numel():.4f}')
+
+        # maxpooling
+        occupancy_grid_L1 = F.max_pool3d(occupancy_grid.unsqueeze(0).unsqueeze(0), 2, stride=2).squeeze(0).squeeze(0) # 256
+        occupancy_grid_L2 = F.max_pool3d(occupancy_grid_L1.unsqueeze(0).unsqueeze(0), 2, stride=2).squeeze(0).squeeze(0) # 128
+        occupancy_grid_L3 = F.max_pool3d(occupancy_grid_L2.unsqueeze(0).unsqueeze(0), 2, stride=2).squeeze(0).squeeze(0) # 64
+        occupancy_grid_L4 = F.max_pool3d(occupancy_grid_L3.unsqueeze(0).unsqueeze(0), 2, stride=2).squeeze(0).squeeze(0) # 32
+        occupancy_grid_L5 = F.max_pool3d(occupancy_grid_L4.unsqueeze(0).unsqueeze(0), 2, stride=2).squeeze(0).squeeze(0) # 16
+
+        # grid features
+        coords = torch.nonzero(occupancy_grid_L3) # [N, 3]
+
+        # total occ blocks to save
+        N_occ = coords.shape[0]
+        # per depth slice we can save at most 255x255 occ blocks.
+        # due to limit of max texture size (2048), we actually only have 2048 / 9 = 227 max size
+        atlas_blocks_z = N_occ // (227 * 227) + 1
+        N_per_slice = math.ceil(N_occ / atlas_blocks_z)
+        atlas_blocks_x = math.ceil(math.sqrt(N_per_slice))
+        atlas_blocks_y = math.ceil(N_per_slice / atlas_blocks_x)
+        atlas_width = 9 * atlas_blocks_x
+        atlas_height = 9 * atlas_blocks_y
+        atlas_depth = 9 * atlas_blocks_z
+
+        print(f'[INFO] Occ blocks: {N_occ}, atlas block size: ({atlas_blocks_x}, {atlas_blocks_y}, {atlas_blocks_z})')
+
+        scene_params['atlas_width'] = atlas_width
+        scene_params['atlas_height'] = atlas_height
+        scene_params['atlas_depth'] = atlas_depth
+        scene_params['num_slices'] = atlas_depth
+        scene_params['atlas_blocks_x'] = atlas_blocks_x
+        scene_params['atlas_blocks_y'] = atlas_blocks_y
+        scene_params['atlas_blocks_z'] = atlas_blocks_z
+
+        atlas_indices = 255 * torch.ones([AS, AS, AS, 3], dtype=torch.long) # [64, 64, 64, 3]
+        atlas_data = torch.zeros([atlas_width, atlas_height, atlas_depth, 8], dtype=torch.float32) # [D, H, W, 3]
+
+        # grid indice
+        indices = torch.arange(N_occ)
+        # indices_w = indices % atlas_blocks_x
+        # indices_hd = indices // atlas_blocks_x
+        # indices_h = indices_hd % atlas_blocks_y
+        # indices_d = indices_hd // atlas_blocks_y
+        indices_w = indices // (atlas_blocks_y * atlas_blocks_z)
+        indices_hd = indices % (atlas_blocks_y * atlas_blocks_z)
+        indices_h = indices_hd // atlas_blocks_z
+        indices_d = indices_hd % atlas_blocks_z
+ 
+        # xyz --> whd
+        atlas_indices[tuple(coords.T)] = torch.stack([indices_w, indices_h, indices_d], dim=1) # [N, 3]
+
+        # convert coords to 9x9x9 xyzs
+        xyzs_000 = (coords / AS) * 2 * bound - bound # [N, 3], left-top point of the 9x9x9 block
+        grid_size = 2 * bound / AS
+        step_size = grid_size / BS
+
+        # loops
+        for i in range(BS + 1):
+            for j in range(BS + 1):
+                for k in range(BS + 1):
+                    # print(f'[INFO] baking features for grid ({i}, {j}, {k})...')
+                    xyzs = (xyzs_000 + torch.tensor([i, j, k], dtype=torch.float32) * step_size).to(device) # [N, 3]
+                    # query features
+                    f_grid = self.model.grid(xyzs, self.model.bound).cpu()
+                    # place in grid
+                    atlas_data[indices_w * (BS + 1) + i, indices_h * (BS + 1) + j, indices_d * (BS + 1) + k] = f_grid
+
+        # triplane features
+        triplane_data = torch.zeros([3, HS, HS, 8], dtype=torch.float32) # [3, 2048, 2048, 8]
+
+        coords = torch.nonzero(occupancy_grid) # [N, 3] at 512^3
+
+        HAS = occupancy_grid.shape[0] # 512
+        HBS = HS // HAS # 4
+
+        xyzs_000 = (coords / HAS) * 2 * bound - bound # [N, 3], left-top point of the 4x4x4 block
+        grid_size = 2 * bound / HAS
+        step_size = grid_size / HBS
+        xyzs_000 += step_size / 2 # offset to pixel center
+
+        for i in range(HBS):
+            for j in range(HBS):
+                for k in range(HBS):
+                    xyzs = (xyzs_000 + torch.tensor([i, j, k], dtype=torch.float32) * step_size).to(device) # [N, 3]
+                    # query features
+                    with torch.no_grad():
+                        f_plane_01 = self.model.planeXY(xyzs[..., [0, 1]], self.model.bound).cpu()
+                        f_plane_12 = self.model.planeYZ(xyzs[..., [1, 2]], self.model.bound).cpu()
+                        f_plane_02 = self.model.planeXZ(xyzs[..., [0, 2]], self.model.bound).cpu()
+                    # triplane indices
+                    triplane_indices = torch.floor((xyzs + bound) / (2 * bound) * HS).long().clamp(0, HS - 1) # [N, 3]
+                    triplane_data[0, triplane_indices[:, 0], triplane_indices[:, 1]] = f_plane_01
+                    triplane_data[1, triplane_indices[:, 1], triplane_indices[:, 2]] = f_plane_12
+                    triplane_data[2, triplane_indices[:, 0], triplane_indices[:, 2]] = f_plane_02
+
+        # save all assets
+        def imwrite(f, x):
+            if x.shape[-1] == 1:
+                cv2.imwrite(f, x)
+            elif x.shape[-1] == 3:
+                cv2.imwrite(f, cv2.cvtColor(x, cv2.COLOR_RGB2BGR))
+            else:
+                cv2.imwrite(f, cv2.cvtColor(x, cv2.COLOR_RGBA2BGRA))
+
+        # occupancy_grid_8-128.png
+        imwrite(os.path.join(save_path, 'occupancy_grid_8.png'), occupancy_grid_L1.cpu().numpy().transpose(0,2,1).reshape(256*256, 256, 1).astype(np.uint8).repeat(4, axis=-1))
+        imwrite(os.path.join(save_path, 'occupancy_grid_16.png'), occupancy_grid_L2.cpu().numpy().transpose(0,2,1).reshape(128*128, 128, 1).astype(np.uint8).repeat(4, axis=-1))
+        imwrite(os.path.join(save_path, 'occupancy_grid_32.png'), occupancy_grid_L3.cpu().numpy().transpose(0,2,1).reshape(64*64, 64, 1).astype(np.uint8).repeat(4, axis=-1))
+        imwrite(os.path.join(save_path, 'occupancy_grid_64.png'), occupancy_grid_L4.cpu().numpy().transpose(0,2,1).reshape(32*32, 32, 1).astype(np.uint8).repeat(4, axis=-1))
+        imwrite(os.path.join(save_path, 'occupancy_grid_128.png'), occupancy_grid_L5.cpu().numpy().transpose(0,2,1).reshape(16*16, 16, 1).astype(np.uint8).repeat(4, axis=-1))
+        
+        # atlas_indices.png
+        imwrite(os.path.join(save_path, 'atlas_indices.png'), atlas_indices.cpu().clamp(0, 255).numpy().transpose(0,2,1,3).reshape(64*64, 64, 3).astype(np.uint8))
+
+        # feature_xxx.png & rgba_xxx.png
+        for i in range(atlas_depth):
+            density = 255 * (atlas_data[..., i, :1] + Q_density) / (2 * Q_density) # [atlas_height, atlas_width, 1]
+            rgb = 255 * (atlas_data[..., i, 1:4] + Q_feature) / (2 * Q_feature)
+            rgb_and_density = torch.cat([rgb, density], dim=-1) # they place density after rgb...
+            feature = 255 * (atlas_data[..., i, 4:] + Q_feature) / (2 * Q_feature)
+
+            print(f'[INFO] grid pre {i}: density: {atlas_data[..., i, 0].min().item()} ~ {atlas_data[..., i, 0].max().item()} rgb: {atlas_data[..., i, 1:4].min().item()} ~ {atlas_data[..., i, 1:4].max().item()} f: {atlas_data[..., i, 4:].min().item()} ~ {atlas_data[..., i, 4:].max().item()}')
+            print(f'[INFO] grid slice {i}: density: {density.min().item()} ~ {density.max().item()} rgb: {rgb.min().item()} ~ {rgb.max().item()} f: {feature.min().item()} ~ {feature.max().item()}')
+
+            imwrite(os.path.join(save_path, f'rgba_{i:03d}.png'), rgb_and_density.clamp(0, 255).cpu().numpy().astype(np.uint8))
+            imwrite(os.path.join(save_path, f'feature_{i:03d}.png'), feature.clamp(0, 255).cpu().numpy().astype(np.uint8))
+
+
+        # plane_featuers_0-2.png & plane_rgb_and_density_0-2.png
+        density = 255 * (triplane_data[..., :1] + Q_density) / (2 * Q_density) # [3, 2048, 2048, 1]
+        rgb = 255 * (triplane_data[..., 1:4] + Q_feature) / (2 * Q_feature)
+        rgb_and_density = torch.cat([rgb, density], dim=-1)
+        feature = 255 * (triplane_data[..., 4:] + Q_feature) / (2 * Q_feature)
+
+        # print(f'[INFO] triplane pre: density: {triplane_data[..., 0].min().item()} ~ {triplane_data[..., 0].max().item()} rgb: {triplane_data[..., 1:4].min().item()} ~ {triplane_data[..., 1:4].max().item()} f: {triplane_data[..., 4:].min().item()} ~ {triplane_data[..., 4:].max().item()}')
+        print(f'[INFO] triplane: density: {density.min().item()} ~ {density.max().item()} rgb: {rgb.min().item()} ~ {rgb.max().item()} f: {feature.min().item()} ~ {feature.max().item()}')
+
+        # damn the coordinate conventions... have to try all combinations...
+        imwrite(os.path.join(save_path, 'plane_rgb_and_density_1.png'), rgb_and_density[0].clamp(0, 255).cpu().numpy().astype(np.uint8))
+        imwrite(os.path.join(save_path, 'plane_rgb_and_density_2.png'), rgb_and_density[1].clamp(0, 255).cpu().numpy().transpose(1,0,2).astype(np.uint8))
+        imwrite(os.path.join(save_path, 'plane_rgb_and_density_0.png'), rgb_and_density[2].clamp(0, 255).cpu().numpy().astype(np.uint8))
+
+        imwrite(os.path.join(save_path, 'plane_features_1.png'), feature[0].clamp(0, 255).cpu().numpy().astype(np.uint8))
+        imwrite(os.path.join(save_path, 'plane_features_2.png'), feature[1].clamp(0, 255).cpu().numpy().transpose(1,0,2).astype(np.uint8))
+        imwrite(os.path.join(save_path, 'plane_features_0.png'), feature[2].clamp(0, 255).cpu().numpy().astype(np.uint8))
+
+        # mlp
+        params = dict(self.model.view_mlp.named_parameters())
+
+        for k, p in params.items():
+            p_np = p.detach().cpu().numpy().T
+            # 'net.0.weight' --> '0_weights'
+            # 'net.0.bias' --> '0_bias'
+            scene_params[k[4:].replace('.', '_').replace('weight', 'weights')] = p_np.tolist()
+
+        # save scene_params.json
+        with open(os.path.join(save_path, 'scene_params.json'), 'w') as f:
+            json.dump(scene_params, f, indent=2)
+
+        self.log(f"==> Finished baking.")
 
     ### ------------------------------
 
