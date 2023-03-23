@@ -10,8 +10,6 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     parser.add_argument('path', type=str)
-    # parser.add_argument('-O', action='store_true', help="recommended settings")
-    # parser.add_argument('-O2', action='store_true', help="recommended settings")
     parser.add_argument('--workspace', type=str, default='workspace')
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--ckpt', type=str, default='latest')
@@ -42,12 +40,12 @@ if __name__ == '__main__':
 
     ### training options
     parser.add_argument('--iters', type=int, default=20000, help="training iters")
-    parser.add_argument('--lr', type=float, default=1e-2, help="initial learning rate")
+    parser.add_argument('--lr', type=float, default=2e-3, help="initial learning rate")
     parser.add_argument('--cuda_ray', action='store_true', help="use CUDA raymarching instead of pytorch")
     parser.add_argument('--max_steps', type=int, default=1024, help="max num steps sampled per ray (only valid when using --cuda_ray)")
     parser.add_argument('--num_steps', type=int, nargs='*', default=[256, 96, 48], help="num steps sampled per ray for each proposal level (only valid when NOT using --cuda_ray)")
     parser.add_argument('--contract', action='store_true', help="apply spatial contraction as in mip-nerf 360, only work for bound > 1, will override bound to 2.")
-    parser.add_argument('--background', type=str, default='last_sample', choices=['white', 'random', 'last_sample'], help="training background mode")
+    parser.add_argument('--background', type=str, default='white', choices=['white', 'random', 'last_sample'], help="training background mode")
 
     parser.add_argument('--update_extra_interval', type=int, default=16, help="iter interval to update extra status (only valid when using --cuda_ray)")
     parser.add_argument('--max_ray_batch', type=int, default=4096 * 2, help="batch size of rays at inference to avoid OOM (only valid when NOT using --cuda_ray)")
@@ -66,14 +64,14 @@ if __name__ == '__main__':
     parser.add_argument('--lambda_entropy', type=float, default=0, help="loss scale")
     parser.add_argument('--lambda_tv', type=float, default=0, help="loss scale")
     parser.add_argument('--lambda_proposal', type=float, default=1, help="loss scale (only for non-cuda-ray mode)")
-    parser.add_argument('--lambda_distort', type=float, default=0, help="loss scale (only for non-cuda-ray mode)")
+    parser.add_argument('--lambda_distort', type=float, default=0.005, help="loss scale (only for non-cuda-ray mode)")
 
     ### GUI options
     parser.add_argument('--vis_pose', action='store_true', help="visualize the poses")
     parser.add_argument('--gui', action='store_true', help="start a GUI")
     parser.add_argument('--W', type=int, default=1000, help="GUI width")
     parser.add_argument('--H', type=int, default=1000, help="GUI height")
-    parser.add_argument('--radius', type=float, default=1.5, help="default GUI camera radius from center")
+    parser.add_argument('--radius', type=float, default=1, help="default GUI camera radius from center")
     parser.add_argument('--fovy', type=float, default=50, help="default GUI camera fovy")
     parser.add_argument('--max_spp', type=int, default=1, help="GUI rendering max sample per pixel")
 

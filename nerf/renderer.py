@@ -441,7 +441,7 @@ class NeRFRenderer(nn.Module):
             deltas_sigmas = deltas * sigmas # [N, T]
 
             # opaque background
-            if self.opt.background == 'last_sample':
+            if not baking and self.opt.background == 'last_sample':
                 deltas_sigmas = torch.cat([deltas_sigmas[..., :-1], torch.full_like(deltas_sigmas[..., -1:], torch.inf)], dim=-1)
 
             alphas = 1 - torch.exp(-deltas_sigmas) # [N, T]
@@ -460,6 +460,7 @@ class NeRFRenderer(nn.Module):
            results['xyzs'] = xyzs # [N, T, 3] in [-2, 2]
            results['weights'] = weights # [N, T]
            results['alphas'] = alphas # [N, T]
+           results['rgbs'] = rgbs
            return results
 
         # composite
@@ -471,6 +472,7 @@ class NeRFRenderer(nn.Module):
         if self.training:
             results['num_points'] = xyzs.shape[0] * xyzs.shape[1]
             results['weights'] = weights
+            results['alphas'] = alphas
 
             if self.opt.lambda_proposal > 0 and update_proposal:
                 results['proposal_loss'] = proposal_loss(all_bins, all_weights)

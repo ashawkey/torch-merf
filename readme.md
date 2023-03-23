@@ -1,21 +1,16 @@
-# nerf-template
+# torch-MeRF
 
-A simple template for practicing NeRF projects.
+An unofficial pytorch implementation of [MeRF: Memory-Efficient Radiance Fields for Real-time View Synthesis in Unbounded Scenes](https://merf42.github.io/).
 
-This is basically a clean and enhanced version of [torch-ngp](https://github.com/ashawkey/torch-ngp) focusing on static NeRF reconstruction of realistic scenes.
-
-Notable changes that improve performance:
-* dataset: random sampling from all training images at each step.
-* dataset: adaptive number of rays during training based on number of points evaluated.
-* model: proposal network for sampling points (non --cuda_ray mode).
-* model: spatial contraction for unbounded scenes.
-
+### Features
+* Piecewise linear contraction.
+* Exporting baked assets fully compatible to the official web renderer.
 
 # Install
 
 ```bash
-git clone https://github.com/ashawkey/nerf_template.git
-cd nerf_template
+git clone https://github.com/ashawkey/torch-merf.git
+cd torch-merf
 ```
 
 ### Install with pip
@@ -55,62 +50,13 @@ python scripts/colmap2nerf.py --images ./data/custom/images/ --run_colmap # if u
 ### Basics
 First time running will take some time to compile the CUDA extensions.
 ```bash
-## -O: instant-ngp
-# prune sampling points by maintaining a density grid
-python main.py data/bonsai/ --workspace trial_bonsai_ngp --enable_cam_center --downscale 4 -O --background random --bound 8
+# train
+python main.py data/bonsai/ --workspace trial_bonsai --enable_cam_center --downscale 4 -O2
 
-## -O2: nerfstudio nerfacto
-# use proposal network to predict sampling points
-python main.py data/bonsai/ --workspace trial_bonsai_nerfacto --enable_cam_center --downscale 4 -O2
+# export baked assets
 
-# MeRF network backbone
-python main.py data/bonsai/ --workspace trial_bonsai_nerfacto --enable_cam_center --downscale 4 -O2 --backbone merf
-```
+# web renderer
 
-### Advanced Usage
-```bash
-### -O: equals
---fp16 --preload
---cuda_ray --mark_untrained
---adaptive_num_rays --random_image_batch
-
-### -O2: equals
---fp16 --preload
---contract --bound 128
---adaptive_num_rays --random_image_batch 
-
-### load checkpoint
---ckpt latest # by default we load the latest checkpoint in the workspace
---ckpt scratch # train from scratch.
---ckpt trial/checkpoints/xxx.pth # specify it by path
-
-### training
---num_rays 4096 # number of rays to evaluate per training step
---adaptive_num_rays # ignore --num_rays and use --num_points to dynamically adjust number of rays.
---num_points 262144 # targeted number of points to evaluate per training step (to adjust num_rays)
-
-### testing
---test # test, save video and mesh
---test_no_video # do not save video
---test_no_mesh # do not save mesh
-
-### dataset related
---data_format [colmap|nerf] # dataset format
---enable_cam_center # use camera center instead of sparse point cloud center as the scene center (colmap dataset only) (only for 360-degree captured datasets, do not use this for forward-facing datasets!)
---enable_cam_near_far # estimate camera near & far from sparse points (colmap dataset only)
-
---bound 16 # scene bound set to [-16, 16]^3.
---scale 0.3 # camera scale, if not specified, automatically estimate one based on camera positions.
-
-### visualization 
---vis_pose # viusalize camera poses and sparse points (sparse points are colmap dataset only)
---gui # open gui (only for testing, training in gui is not well supported!)
-
-### balance between surface quality / rendering quality
-
-# increase these weights to get better surface quality but worse rendering quality
---lambda_tv 1e-7 # total variation loss
---lambda_entropy 1e-3 # entropy on rendering weights (transparency, alpha), encourage them to be either 0 or 1
 ```
 
 Please check the `scripts` directory for more examples on common datasets, and check `main.py` for all options.

@@ -40,18 +40,6 @@ class HashEncoder(nn.Module):
     def grad_total_variation(self, lambda_tv):
         self.encoder.grad_total_variation(lambda_tv)
 
-class DenseEncoder(nn.Module):
-    def __init__(self, input_dim=3, output_dim=8, resolution=64):
-        super().__init__()
-        self.output_dim = output_dim
-        self.grid = nn.Parameter(torch.zeros([1, output_dim] + [resolution] * 3))
-    
-    def forward(self, x, bound):
-        shape = x.shape[:-1]
-        x = x / bound
-        out = F.grid_sample(self.grid, x.view(1, 1, 1, -1, 3).contiguous(), align_corners=True).view(self.output_dim, -1)
-        out = out.T.reshape(*shape, self.output_dim)
-        return out
 
 # MeRF like
 class NeRFNetwork(NeRFRenderer):
@@ -63,7 +51,6 @@ class NeRFNetwork(NeRFRenderer):
 
         # grid
         self.grid = HashEncoder(input_dim=3, level_dim=2, num_levels=16, log2_hashmap_size=19, desired_resolution=512, output_dim=8, num_layers=2, hidden_dim=64)
-        # self.grid = DenseEncoder(input_dim=3, output_dim=8, resolution=64)
 
         # triplane
         self.planeXY = HashEncoder(input_dim=2, level_dim=2, num_levels=16, log2_hashmap_size=19, desired_resolution=2048, output_dim=8, num_layers=2, hidden_dim=64)
@@ -80,35 +67,52 @@ class NeRFNetwork(NeRFRenderer):
             self.prop_mlp = nn.ModuleList()
 
             # hard coded 2-layer prop network
-            prop0_encoder, prop0_in_dim = get_encoder("hashgrid", input_dim=3, level_dim=2, num_levels=5, log2_hashmap_size=17, desired_resolution=128)
+            prop0_encoder, prop0_in_dim = get_encoder("hashgrid", input_dim=3, level_dim=2, num_levels=10, log2_hashmap_size=16, desired_resolution=256)
             prop0_mlp = MLP(prop0_in_dim, 1, 16, 2, bias=False)
             self.prop_encoders.append(prop0_encoder)
             self.prop_mlp.append(prop0_mlp)
 
-            prop1_encoder, prop1_in_dim = get_encoder("hashgrid", input_dim=3, level_dim=2, num_levels=5, log2_hashmap_size=17, desired_resolution=256)
+            prop1_encoder, prop1_in_dim = get_encoder("hashgrid", input_dim=3, level_dim=2, num_levels=10, log2_hashmap_size=16, desired_resolution=512)
             prop1_mlp = MLP(prop1_in_dim, 1, 16, 2, bias=False)
             self.prop_encoders.append(prop1_encoder)
             self.prop_mlp.append(prop1_mlp)
 
     def common_forward(self, x):
         
-        f_grid = self.grid(x, self.bound)
-        f_plane_01 = self.planeXY(x[..., [0, 1]], self.bound)
-        f_plane_12 = self.planeYZ(x[..., [1, 2]], self.bound)
-        f_plane_02 = self.planeXZ(x[..., [0, 2]], self.bound)
+        f_grid = self.quantize_feature(self.grid(x, self.bound))
+        f_plane_01 = self.quantize_feature(self.planeXY(x[..., [0, 1]], self.bound))
+        f_plane_12 = self.quantize_feature(self.planeYZ(x[..., [1, 2]], self.bound))
+        f_plane_02 = self.quantize_feature(self.planeXZ(x[..., [0, 2]], self.bound))
 
-        return f_grid, f_plane_01, f_plane_12, f_plane_02        
+        f = f_grid + f_plane_01 + f_plane_12 + f_plane_02
+
+        f_sigma = f[..., 0]
+        f_diffuse = f[..., 1:4]
+        f_specular = f[..., 4:]
+
+        return f_sigma, f_diffuse, f_specular
+    
+    def quantize_feature(self, f):
+        f[..., 0] = self.quantize(f[..., 0], 14)
+        f[..., 1:] = self.quantize(f[..., 1:], 7)
+        return f
+    
+    def quantize(self, x, m=7):
+        # x: in real value, to be quantized in to [-m, m]
+        x = torch.sigmoid(x)
+        x = x + (torch.floor(255 * x + 0.5) / 255 - x).detach()
+        x = 2 * m * x - m
+        return x
 
     def forward(self, x, d, shading='full'):
         # x: [N, 3], in [-bound, bound]
         # d: [N, 3], nomalized in [-1, 1]
 
-        f_grid, f_plane_01, f_plane_12, f_plane_02 = self.common_forward(x)
-        f = f_grid + f_plane_01 + f_plane_12 + f_plane_02
+        f_sigma, f_diffuse, f_specular = self.common_forward(x)
 
-        sigma = trunc_exp(f[..., 0] - 1)
-        diffuse = torch.sigmoid(f[..., 1:4])
-        f_specular = torch.sigmoid(f[..., 4:])
+        sigma = trunc_exp(f_sigma - 1) # in shader they use exp(x - 1)
+        diffuse = torch.sigmoid(f_diffuse)
+        f_specular = torch.sigmoid(f_specular)
 
         d = self.view_encoder(d)
         if shading == 'diffuse':
@@ -138,20 +142,19 @@ class NeRFNetwork(NeRFRenderer):
             sigma = trunc_exp(self.prop_mlp[proposal](self.prop_encoders[proposal](x, bound=self.bound)).squeeze(-1) - 1)
         # final NeRF
         else:
-            f_grid, f_plane_01, f_plane_12, f_plane_02 = self.common_forward(x)
-            f = f_grid + f_plane_01 + f_plane_12 + f_plane_02
-            sigma = trunc_exp(f[..., 0] - 1)
+            f_sigma, f_diffuse, f_specular = self.common_forward(x)
+            sigma = trunc_exp(f_sigma - 1)
 
         return {
             'sigma': sigma,
         }
     
+
     def apply_total_variation(self, lambda_tv):
-        pass
-        # self.grid.grad_total_variation(lambda_tv)
-        # self.planeXY.grad_total_variation(lambda_tv)
-        # self.planeXZ.grad_total_variation(lambda_tv)
-        # self.planeYZ.grad_total_variation(lambda_tv)
+        self.grid.grad_total_variation(lambda_tv)
+        # self.planeXY.grad_total_variation(lambda_tv * 0.1)
+        # self.planeXZ.grad_total_variation(lambda_tv * 0.1)
+        # self.planeYZ.grad_total_variation(lambda_tv * 0.1)
 
     # optimizer utils
     def get_params(self, lr):
