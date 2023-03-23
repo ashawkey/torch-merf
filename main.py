@@ -50,7 +50,7 @@ if __name__ == '__main__':
     parser.add_argument('--background', type=str, default='last_sample', choices=['white', 'random', 'last_sample'], help="training background mode")
 
     parser.add_argument('--update_extra_interval', type=int, default=16, help="iter interval to update extra status (only valid when using --cuda_ray)")
-    parser.add_argument('--max_ray_batch', type=int, default=4096 * 4, help="batch size of rays at inference to avoid OOM (only valid when NOT using --cuda_ray)")
+    parser.add_argument('--max_ray_batch', type=int, default=4096 * 2, help="batch size of rays at inference to avoid OOM (only valid when NOT using --cuda_ray)")
     parser.add_argument('--grid_size', type=int, default=128, help="density grid resolution")
     parser.add_argument('--mark_untrained', action='store_true', help="mark_untrained grid")
     parser.add_argument('--dt_gamma', type=float, default=1/256, help="dt_gamma (>=0) for adaptive ray marching. set to 0 to disable, >0 to accelerate rendering (but usually with worse quality)")

@@ -14,6 +14,7 @@ import time
 
 import cv2
 import matplotlib.pyplot as plt
+import torch_scatter
 
 import torch
 import torch.nn as nn
@@ -608,27 +609,26 @@ class Trainer(object):
         return pred_rgb, pred_depth    
 
     @torch.no_grad()
-    def save_baking(self, loader, save_path=None, name=None):
+    def save_baking(self, loader, save_path=None):
 
         if save_path is None:
             save_path = os.path.join(self.workspace, 'assets')
 
         self.log(f"==> Saving assets to {save_path}")
-
+        
         os.makedirs(save_path, exist_ok=True)
 
         self.log(f"==> Start Baking, save results to {save_path}")
 
         self.model.eval()
-
         device = self.device
 
-        bound = self.model.bound # always 2
+        bound = self.model.bound # always 2 in contracted mode
         BS = 8 # block size
         LS = 512
         AS = LS // BS # 64, atlas size
         HS = 2048
-        thresh = 0.005
+        thresh = 0.005 # hard coded as in paper
         Q_density = 14
         Q_feature = 7
 
@@ -653,7 +653,7 @@ class Trainer(object):
             "format": "png",
         }
 
-        # covers the [-2, 2]^3 space?
+        # covers the [-2, 2]^3 space
         occupancy_grid = torch.zeros([LS, LS, LS], dtype=torch.float32)
 
         for i, data in enumerate(tqdm.tqdm(loader)):
@@ -661,7 +661,6 @@ class Trainer(object):
             rays_o = data['rays_o'] # [N, 3]
             rays_d = data['rays_d'] # [N, 3]
             index = data['index'] # [1/N]
-            H, W = data['H'], data['W']
             cam_near_far = data['cam_near_far'] if 'cam_near_far' in data else None # [1/N, 2] or None
 
             outputs = self.model.render(rays_o, rays_d, index=index, bg_color=None, perturb=False, cam_near_far=cam_near_far, shading='diffuse', baking=True)
@@ -669,19 +668,15 @@ class Trainer(object):
             xyzs = outputs['xyzs'].reshape(-1, 3).cpu()
             weights = outputs['weights'].reshape(-1).cpu()
             alphas = outputs['alphas'].reshape(-1).cpu()
-            rgbs = outputs['rgbs'].reshape(-1, 3).cpu()
 
             # thresholding
             mask = (weights > thresh) & (alphas > thresh)
             xyzs = xyzs[mask] # [N, 3] in [-2, 2]
-            rgbs = rgbs[mask]
 
-            # plot_pointcloud(xyzs.numpy(), rgbs.numpy())
-
-            # mark occupancy
+            # mark occupancy, write data
             coords = torch.floor((xyzs + bound) / (2 * bound) * LS).long().clamp(0, LS - 1) # [N, 3]
             occupancy_grid[tuple(coords.T)] = 1
-        
+
         print(f'[INFO] Occupancy rate: {(occupancy_grid > 0).sum().item() / occupancy_grid.numel():.4f}')
 
         # maxpooling
@@ -719,26 +714,8 @@ class Trainer(object):
         atlas_indices = 255 * torch.ones([AS, AS, AS, 3], dtype=torch.long) # [64, 64, 64, 3]
         atlas_data = torch.zeros([atlas_width, atlas_height, atlas_depth, 8], dtype=torch.float32) # [W, H, D, 8]
 
-        # tmp debug
-        # atlas_data[..., 0] = 14
-        # colors = [
-        #     torch.tensor([7, 0, 0], dtype=torch.float32),
-        #     torch.tensor([0, 7, 0], dtype=torch.float32),
-        #     torch.tensor([0, 0, 7], dtype=torch.float32),
-        # ]
-        # n = 0
-        # for i in range(atlas_blocks_x):
-        #     for j in range(atlas_blocks_y):
-        #         for k in range(atlas_blocks_z):
-        #             atlas_data[i*9:(i+1)*9, j*9:(j+1)*9, k*9:(k+1)*9, 1:4] = colors[n % 3]
-        #             n += 1
-
         # grid indice
         indices = torch.arange(N_occ)
-        # indices_w = indices % atlas_blocks_x
-        # indices_hd = indices // atlas_blocks_x
-        # indices_h = indices_hd % atlas_blocks_y
-        # indices_d = indices_hd // atlas_blocks_y
         indices_w = indices // (atlas_blocks_y * atlas_blocks_z)
         indices_hd = indices % (atlas_blocks_y * atlas_blocks_z)
         indices_h = indices_hd // atlas_blocks_z
@@ -759,17 +736,18 @@ class Trainer(object):
                     # print(f'[INFO] baking features for grid ({i}, {j}, {k})...')
                     xyzs = (xyzs_000 + torch.tensor([i, j, k], dtype=torch.float32) * step_size).to(device) # [N, 3]
 
-                    # query features (multiple times)
-                    f = 0
-                    for _ in range(16):
+                    # query features
+                    f_grid = 0
+                    num_samples = 4
+                    for _ in range(num_samples):
                         xyzs_jittor = xyzs + (torch.rand_like(xyzs) - 0.5) * step_size
-                        f += self.model.grid(xyzs_jittor, self.model.bound).cpu()
-                    f /= 16
+                        f_grid += self.model.grid(xyzs_jittor, self.model.bound).cpu()
+                    f_grid /= num_samples
+                    
+                    # plot_pointcloud(xyzs.cpu().numpy(), torch.sigmoid(f_grid[..., 1:4]).numpy())
 
-                    # plot_pointcloud(xyzs.cpu().numpy(), torch.sigmoid(f[..., 1:4]).numpy())
-
-                    # place in grid
-                    atlas_data[indices_w * (BS + 1) + i, indices_h * (BS + 1) + j, indices_d * (BS + 1) + k] = f
+                    # place in grid (note the coordinate conventions!)
+                    atlas_data[indices_w * (BS + 1) + j, indices_h * (BS + 1) + k, indices_d * (BS + 1) + i] = f_grid
 
         # triplane features
         triplane_data = torch.zeros([3, HS, HS, 8], dtype=torch.float32) # [3, 2048, 2048, 8]
@@ -797,7 +775,7 @@ class Trainer(object):
                     triplane_indices = torch.floor((xyzs + bound) / (2 * bound) * HS).long().clamp(0, HS - 1) # [N, 3]
                     triplane_data[0, triplane_indices[:, 0], triplane_indices[:, 1]] = f_plane_01
                     triplane_data[1, triplane_indices[:, 1], triplane_indices[:, 2]] = f_plane_12
-                    triplane_data[2, triplane_indices[:, 0], triplane_indices[:, 2]] = f_plane_02
+                    triplane_data[2, triplane_indices[:, 0], triplane_indices[:, 2]] = f_plane_02        
 
         # save all assets
         def imwrite(f, x):
@@ -821,9 +799,6 @@ class Trainer(object):
         # feature_xxx.png & rgba_xxx.png
         for i in range(atlas_depth):
             density = 255 * (atlas_data[..., i, :1] + Q_density) / (2 * Q_density) # [atlas_height, atlas_width, 1]
-
-            # density = 255 * torch.ones_like(density)
-
             rgb = 255 * (atlas_data[..., i, 1:4] + Q_feature) / (2 * Q_feature)
             rgb_and_density = torch.cat([rgb, density], dim=-1) # they place density after rgb...
             feature = 255 * (atlas_data[..., i, 4:] + Q_feature) / (2 * Q_feature)
@@ -831,8 +806,8 @@ class Trainer(object):
             print(f'[INFO] grid pre {i}: density: {atlas_data[..., i, 0].min().item()} ~ {atlas_data[..., i, 0].max().item()} rgb: {atlas_data[..., i, 1:4].min().item()} ~ {atlas_data[..., i, 1:4].max().item()} f: {atlas_data[..., i, 4:].min().item()} ~ {atlas_data[..., i, 4:].max().item()}')
             print(f'[INFO] grid slice {i}: density: {density.min().item()} ~ {density.max().item()} rgb: {rgb.min().item()} ~ {rgb.max().item()} f: {feature.min().item()} ~ {feature.max().item()}')
 
-            imwrite(os.path.join(save_path, f'rgba_{i:03d}.png'), rgb_and_density.clamp(0, 255).cpu().numpy().astype(np.uint8))
-            imwrite(os.path.join(save_path, f'feature_{i:03d}.png'), feature.clamp(0, 255).cpu().numpy().astype(np.uint8))
+            imwrite(os.path.join(save_path, f'rgba_{i:03d}.png'), rgb_and_density.clamp(0, 255).cpu().numpy().transpose(1,0,2).astype(np.uint8))
+            imwrite(os.path.join(save_path, f'feature_{i:03d}.png'), feature.clamp(0, 255).cpu().numpy().transpose(1,0,2).astype(np.uint8))
 
 
         # plane_featuers_0-2.png & plane_rgb_and_density_0-2.png

@@ -31,7 +31,7 @@ class MLP(nn.Module):
 class HashEncoder(nn.Module):
     def __init__(self, input_dim=3, level_dim=2, num_levels=16, log2_hashmap_size=19, desired_resolution=512, output_dim=8, num_layers=2, hidden_dim=64):
         super().__init__()
-        self.encoder, self.in_dim = get_encoder("tiledgrid", input_dim=input_dim, level_dim=level_dim, num_levels=num_levels, log2_hashmap_size=log2_hashmap_size, desired_resolution=desired_resolution, interpolation='smoothstep')
+        self.encoder, self.in_dim = get_encoder("tiledgrid", input_dim=input_dim, level_dim=level_dim, num_levels=num_levels, log2_hashmap_size=log2_hashmap_size, desired_resolution=desired_resolution, interpolation='linear')
         self.mlp = MLP(self.in_dim, output_dim, hidden_dim, num_layers, bias=False)
     
     def forward(self, x, bound):
@@ -62,11 +62,10 @@ class NeRFNetwork(NeRFRenderer):
         super().__init__(opt)
 
         # grid
-        # self.grid = HashEncoder(input_dim=3, level_dim=2, num_levels=16, log2_hashmap_size=19, desired_resolution=512, output_dim=8, num_layers=2, hidden_dim=64)
-        self.grid = DenseEncoder(input_dim=3, output_dim=8, resolution=64)
+        self.grid = HashEncoder(input_dim=3, level_dim=2, num_levels=16, log2_hashmap_size=19, desired_resolution=512, output_dim=8, num_layers=2, hidden_dim=64)
+        # self.grid = DenseEncoder(input_dim=3, output_dim=8, resolution=64)
 
         # triplane
-        # NOTE: per encoder per MLP? or one MLP for all encoders?
         self.planeXY = HashEncoder(input_dim=2, level_dim=2, num_levels=16, log2_hashmap_size=19, desired_resolution=2048, output_dim=8, num_layers=2, hidden_dim=64)
         self.planeYZ = HashEncoder(input_dim=2, level_dim=2, num_levels=16, log2_hashmap_size=19, desired_resolution=2048, output_dim=8, num_layers=2, hidden_dim=64)
         self.planeXZ = HashEncoder(input_dim=2, level_dim=2, num_levels=16, log2_hashmap_size=19, desired_resolution=2048, output_dim=8, num_layers=2, hidden_dim=64)
@@ -92,27 +91,24 @@ class NeRFNetwork(NeRFRenderer):
             self.prop_mlp.append(prop1_mlp)
 
     def common_forward(self, x):
-
+        
         f_grid = self.grid(x, self.bound)
+        f_plane_01 = self.planeXY(x[..., [0, 1]], self.bound)
+        f_plane_12 = self.planeYZ(x[..., [1, 2]], self.bound)
+        f_plane_02 = self.planeXZ(x[..., [0, 2]], self.bound)
 
-        f_plane = self.planeXY(x[..., [0, 1]], self.bound) + \
-                  self.planeYZ(x[..., [1, 2]], self.bound) + \
-                  self.planeXZ(x[..., [0, 2]], self.bound)
-
-        f = f_grid + f_plane
-        # f = f_plane
-
-        sigma = trunc_exp(f[..., 0] - 1)
-        diffuse = torch.sigmoid(f[..., 1:4])
-        f_specular = torch.sigmoid(f[..., 4:])
-
-        return sigma, diffuse, f_specular
+        return f_grid, f_plane_01, f_plane_12, f_plane_02        
 
     def forward(self, x, d, shading='full'):
         # x: [N, 3], in [-bound, bound]
         # d: [N, 3], nomalized in [-1, 1]
 
-        sigma, diffuse, f_specular = self.common_forward(x)
+        f_grid, f_plane_01, f_plane_12, f_plane_02 = self.common_forward(x)
+        f = f_grid + f_plane_01 + f_plane_12 + f_plane_02
+
+        sigma = trunc_exp(f[..., 0] - 1)
+        diffuse = torch.sigmoid(f[..., 1:4])
+        f_specular = torch.sigmoid(f[..., 4:])
 
         d = self.view_encoder(d)
         if shading == 'diffuse':
@@ -126,11 +122,13 @@ class NeRFNetwork(NeRFRenderer):
             else: # full
                 color = (specular + diffuse).clamp(0, 1) # specular + albedo
 
-        return {
+        results = {
             'sigma': sigma,
             'color': color,
             'specular': specular,
         }
+
+        return results
 
 
     def density(self, x, proposal=-1):
@@ -140,7 +138,9 @@ class NeRFNetwork(NeRFRenderer):
             sigma = trunc_exp(self.prop_mlp[proposal](self.prop_encoders[proposal](x, bound=self.bound)).squeeze(-1) - 1)
         # final NeRF
         else:
-            sigma, _, _ = self.common_forward(x)
+            f_grid, f_plane_01, f_plane_12, f_plane_02 = self.common_forward(x)
+            f = f_grid + f_plane_01 + f_plane_12 + f_plane_02
+            sigma = trunc_exp(f[..., 0] - 1)
 
         return {
             'sigma': sigma,
