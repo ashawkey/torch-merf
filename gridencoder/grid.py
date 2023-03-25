@@ -148,12 +148,10 @@ class GridEncoder(nn.Module):
     def __repr__(self):
         return f"GridEncoder: input_dim={self.input_dim} num_levels={self.num_levels} level_dim={self.level_dim} resolution={self.base_resolution} -> {int(round(self.base_resolution * self.per_level_scale ** (self.num_levels - 1)))} per_level_scale={self.per_level_scale:.4f} params={tuple(self.embeddings.shape)} gridtype={self.gridtype} align_corners={self.align_corners} interpolation={self.interpolation}"
     
-    def forward(self, inputs, bound=1, max_level=None):
-        # inputs: [..., input_dim], normalized real world positions in [-bound, bound]
+    def forward(self, inputs, max_level=None):
+        # inputs: [..., input_dim], normalized real world positions in [0, 1]
         # max_level: only calculate first max_level levels (None will use all levels)
         # return: [..., num_levels * level_dim]
-
-        inputs = (inputs + bound) / (2 * bound) # map to [0, 1]
         
         #print('inputs', inputs.shape, inputs.dtype, inputs.min().item(), inputs.max().item())
 
@@ -169,7 +167,7 @@ class GridEncoder(nn.Module):
 
     # always run in float precision!
     @torch.cuda.amp.autocast(enabled=False)
-    def grad_total_variation(self, weight=1e-7, inputs=None, bound=1, B=1000000):
+    def grad_total_variation(self, weight=1e-7, inputs=None, B=1000000):
         # inputs: [..., input_dim], float in [-b, b], location to calculate TV loss.
         
         D = self.input_dim
@@ -182,7 +180,6 @@ class GridEncoder(nn.Module):
             # randomized in [0, 1]
             inputs = torch.rand(B, self.input_dim, device=self.embeddings.device)
         else:
-            inputs = (inputs + bound) / (2 * bound) # map to [0, 1]
             inputs = inputs.view(-1, self.input_dim)
             B = inputs.shape[0]
 

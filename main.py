@@ -15,9 +15,12 @@ if __name__ == '__main__':
     parser.add_argument('--ckpt', type=str, default='latest')
     parser.add_argument('--fp16', action='store_true', help="use amp mixed precision training")
 
+    parser.add_argument('--use_grid', type=int, default=1)
+    parser.add_argument('--use_triplane', type=int, default=1)
+
     ### testing options
-    parser.add_argument('--save_cnt', type=int, default=50, help="save checkpoints for $ times during training")
-    parser.add_argument('--eval_cnt', type=int, default=10, help="perform validation for $ times during training")
+    parser.add_argument('--save_cnt', type=int, default=10, help="save checkpoints for $ times during training")
+    parser.add_argument('--eval_cnt', type=int, default=1, help="perform validation for $ times during training")
     parser.add_argument('--test', action='store_true', help="test mode")
     parser.add_argument('--test_no_video', action='store_true', help="test mode: do not save video")
     parser.add_argument('--test_no_baking', action='store_true', help="test mode: do not save mesh")
@@ -25,7 +28,7 @@ if __name__ == '__main__':
 
     ### dataset options
     parser.add_argument('--data_format', type=str, default='colmap', choices=['nerf', 'colmap', 'dtu'])
-    parser.add_argument('--train_split', type=str, default='all', choices=['train', 'all'])
+    parser.add_argument('--train_split', type=str, default='train', choices=['train', 'all'])
     parser.add_argument('--test_split', type=str, default='test', choices=['train', 'val', 'test'])
     parser.add_argument('--preload', action='store_true', help="preload all data into GPU, accelerate training but use more GPU memory")
     parser.add_argument('--random_image_batch', action='store_true', help="randomly sample rays from all images per step in training")
@@ -40,7 +43,7 @@ if __name__ == '__main__':
 
     ### training options
     parser.add_argument('--iters', type=int, default=20000, help="training iters")
-    parser.add_argument('--lr', type=float, default=2e-3, help="initial learning rate")
+    parser.add_argument('--lr', type=float, default=1e-3, help="initial learning rate")
     parser.add_argument('--cuda_ray', action='store_true', help="use CUDA raymarching instead of pytorch")
     parser.add_argument('--max_steps', type=int, default=1024, help="max num steps sampled per ray (only valid when using --cuda_ray)")
     parser.add_argument('--num_steps', type=int, nargs='*', default=[256, 96, 48], help="num steps sampled per ray for each proposal level (only valid when NOT using --cuda_ray)")
@@ -64,7 +67,8 @@ if __name__ == '__main__':
     parser.add_argument('--lambda_entropy', type=float, default=0, help="loss scale")
     parser.add_argument('--lambda_tv', type=float, default=0, help="loss scale")
     parser.add_argument('--lambda_proposal', type=float, default=1, help="loss scale (only for non-cuda-ray mode)")
-    parser.add_argument('--lambda_distort', type=float, default=0.005, help="loss scale (only for non-cuda-ray mode)")
+    parser.add_argument('--lambda_distort', type=float, default=0.01, help="loss scale (only for non-cuda-ray mode)")
+    parser.add_argument('--lambda_specular', type=float, default=2e-5, help="loss scale")
 
     ### GUI options
     parser.add_argument('--vis_pose', action='store_true', help="visualize the poses")
@@ -127,9 +131,10 @@ if __name__ == '__main__':
 
                 trainer.test(test_loader, write_video=True) # test and save video
             
-            if not opt.test_no_baking:    
-                all_loader = NeRFDataset(opt, device=device, type='all').dataloader()
-                trainer.save_baking(loader=all_loader)
+            if not opt.test_no_baking:
+                all_loader = NeRFDataset(opt, device=device, type=opt.train_split)
+                all_loader.training = False # load full image from train split
+                trainer.save_baking(loader=all_loader.dataloader())
         
     else:
         
@@ -146,9 +151,9 @@ if __name__ == '__main__':
         if not opt.contract and opt.data_format == 'colmap':
             model.update_aabb(train_loader._data.pts_aabb)
 
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda iter: 0.1 ** ((iter - 100) / (opt.iters - 100)) if iter > 100 else 0.99 * (iter / 100) + 0.01)
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda iter: 0.1 ** (iter / opt.iters))
 
-        trainer = Trainer('ngp', opt, model, device=device, workspace=opt.workspace, optimizer=optimizer, criterion=criterion, ema_decay=0.95, fp16=opt.fp16, lr_scheduler=scheduler, scheduler_update_every_step=True, use_checkpoint=opt.ckpt, eval_interval=eval_interval, save_interval=save_interval)
+        trainer = Trainer('ngp', opt, model, device=device, workspace=opt.workspace, optimizer=optimizer, criterion=criterion, ema_decay=None, fp16=opt.fp16, lr_scheduler=scheduler, scheduler_update_every_step=True, use_checkpoint=opt.ckpt, eval_interval=eval_interval, save_interval=save_interval)
 
         if opt.gui:
             gui = NeRFGUI(opt, trainer, train_loader)
@@ -172,5 +177,6 @@ if __name__ == '__main__':
             
             trainer.test(test_loader, write_video=True) # test and save video
 
-            all_loader = NeRFDataset(opt, device=device, type='all').dataloader()
-            trainer.save_baking(loader=all_loader)
+            all_loader = NeRFDataset(opt, device=device, type=opt.train_split)
+            all_loader.training = False # load full image from train split
+            trainer.save_baking(loader=all_loader.dataloader())

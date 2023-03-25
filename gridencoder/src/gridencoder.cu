@@ -157,7 +157,10 @@ __global__ void kernel_grid(
         }
     }
 
-    //printf("[b=%d, l=%d] pos=(%f, %f)+(%d, %d)\n", b, level, pos[0], pos[1], pos_grid[0], pos_grid[1]);
+    // verification of alignment
+    // if (level == L - 1 && b < 4) {
+    //     printf("[b=%d, l=%d] pos=(%f, %f)+(%d, %d)\n", b, level, pos[0], pos[1], pos_grid[0], pos_grid[1]);
+    // }
 
     // interpolate
     scalar_t results[C] = {0}; // temp results in register

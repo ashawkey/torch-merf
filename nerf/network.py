@@ -28,17 +28,85 @@ class MLP(nn.Module):
         return x
 
 
-class HashEncoder(nn.Module):
-    def __init__(self, input_dim=3, level_dim=2, num_levels=16, log2_hashmap_size=19, desired_resolution=512, output_dim=8, num_layers=2, hidden_dim=64):
+class Grid(nn.Module):
+    def __init__(self, level_dim=2, num_levels=16, log2_hashmap_size=19, desired_resolution=512, output_dim=8, num_layers=2, hidden_dim=64, interpolation='linear'):
         super().__init__()
-        self.encoder, self.in_dim = get_encoder("tiledgrid", input_dim=input_dim, level_dim=level_dim, num_levels=num_levels, log2_hashmap_size=log2_hashmap_size, desired_resolution=desired_resolution, interpolation='linear')
+        self.resolution = desired_resolution # align corners (index in [0, resolution], resolution + 1 values!)
+        self.encoder, self.in_dim = get_encoder("hashgrid", input_dim=3, level_dim=level_dim, num_levels=num_levels, log2_hashmap_size=log2_hashmap_size, desired_resolution=desired_resolution + 1, interpolation=interpolation)
         self.mlp = MLP(self.in_dim, output_dim, hidden_dim, num_layers, bias=False)
     
-    def forward(self, x, bound):
-        return self.mlp(self.encoder(x, bound=bound))
+    def forward(self, xyz, bound):
+        # manually perform the interpolation after any nonlinear MLP...
+        # this resembles align_corners = True
+
+        xyz = (xyz + bound) / (2 * bound) # [0, 1]
+        coords = xyz * self.resolution # [0, resolution]
+        # float coord
+        cx, cy, cz = coords[..., 0], coords[..., 1], coords[..., 2] 
+        # int coord
+        cx0, cy0, cz0 = cx.floor().clamp(0, self.resolution - 1).long(), cy.floor().clamp(0, self.resolution - 1).long(), cz.floor().clamp(0, self.resolution - 1).long()
+        cx1, cy1, cz1 = cx0 + 1, cy0 + 1, cz0 + 1
+        # interp weights
+        u, v, w = (cx - cx0).unsqueeze(-1), (cy - cy0).unsqueeze(-1), (cz - cz0).unsqueeze(-1) # [N, 1] in [0, 1]
+        # interp positions
+        f000 = self.mlp(self.encoder(torch.stack([cx0, cy0, cz0], dim=-1).float() / self.resolution))
+        f001 = self.mlp(self.encoder(torch.stack([cx0, cy0, cz1], dim=-1).float() / self.resolution))
+        f010 = self.mlp(self.encoder(torch.stack([cx0, cy1, cz0], dim=-1).float() / self.resolution))
+        f011 = self.mlp(self.encoder(torch.stack([cx0, cy1, cz1], dim=-1).float() / self.resolution))
+        f100 = self.mlp(self.encoder(torch.stack([cx1, cy0, cz0], dim=-1).float() / self.resolution))
+        f101 = self.mlp(self.encoder(torch.stack([cx1, cy0, cz1], dim=-1).float() / self.resolution))
+        f110 = self.mlp(self.encoder(torch.stack([cx1, cy1, cz0], dim=-1).float() / self.resolution))
+        f111 = self.mlp(self.encoder(torch.stack([cx1, cy1, cz1], dim=-1).float() / self.resolution))
+        # interp
+        f = (1 - w) * (1 - v) * (1 - u) * f000 + \
+            (1 - w) * (1 - v) * u * f100 + \
+            (1 - w) * v * (1 - u) * f010 + \
+            (1 - w) * v * u * f110 + \
+            w * (1 - v) * (1 - u) * f001 + \
+            w * (1 - v) * u * f101 + \
+            w * v * (1 - u) * f011 + \
+            w * v * u * f111
+        return f
 
     def grad_total_variation(self, lambda_tv):
         self.encoder.grad_total_variation(lambda_tv)
+
+
+class Plane(nn.Module):
+    def __init__(self, level_dim=2, num_levels=16, log2_hashmap_size=19, desired_resolution=2048, output_dim=8, num_layers=2, hidden_dim=64, interpolation='linear'):
+        super().__init__()
+        self.resolution = desired_resolution # align corners (index in [0, resolution], resolution + 1 values!)
+        self.encoder, self.in_dim = get_encoder("hashgrid", input_dim=2, level_dim=level_dim, num_levels=num_levels, log2_hashmap_size=log2_hashmap_size, desired_resolution=desired_resolution, interpolation=interpolation)
+        self.mlp = MLP(self.in_dim, output_dim, hidden_dim, num_layers, bias=False)
+    
+    def forward(self, xy, bound):
+        # manually perform the interpolation after any nonlinear MLP...
+        # this resembles align_corners = False
+
+        xy = (xy + bound) / (2 * bound) # [0, 1]
+        coords = xy * self.resolution - 0.5 # [-0.5, resolution-0.5]
+        coords = coords.clamp(0, self.resolution - 1) # [0, resolution-1]
+        # float coord
+        cx, cy = coords[..., 0], coords[..., 1]
+        # int coord
+        cx0, cy0 = cx.floor().long(), cy.floor().long()
+        cx1, cy1 = (cx0 + 1).clamp(0, self.resolution - 1), (cy0 + 1).clamp(0, self.resolution - 1)
+        # interp weights
+        u, v = (cx - cx0).unsqueeze(-1), (cy - cy0).unsqueeze(-1) # [N, 1] in [0, 1]
+        # interp positions
+        f00 = self.mlp(self.encoder((torch.stack([cx0, cy0], dim=-1).float() + 0.5) / self.resolution))
+        f01 = self.mlp(self.encoder((torch.stack([cx0, cy1], dim=-1).float() + 0.5) / self.resolution))
+        f10 = self.mlp(self.encoder((torch.stack([cx1, cy0], dim=-1).float() + 0.5) / self.resolution))
+        f11 = self.mlp(self.encoder((torch.stack([cx1, cy1], dim=-1).float() + 0.5) / self.resolution))
+        # interp
+        f = (1 - v) * (1 - u) * f00 + \
+            (1 - v) * u * f10 + \
+            v * (1 - u) * f01 + \
+            v * u * f11
+        return f
+
+    def grad_total_variation(self, lambda_tv):
+        self.encoder.grad_total_variation(lambda_tv)        
 
 
 # MeRF like
@@ -50,12 +118,14 @@ class NeRFNetwork(NeRFRenderer):
         super().__init__(opt)
 
         # grid
-        self.grid = HashEncoder(input_dim=3, level_dim=2, num_levels=16, log2_hashmap_size=19, desired_resolution=512, output_dim=8, num_layers=2, hidden_dim=64)
-
+        # if self.opt.use_grid:
+        self.grid = Grid(level_dim=2, num_levels=16, log2_hashmap_size=19, desired_resolution=512, output_dim=8, num_layers=2, hidden_dim=32)
+        
         # triplane
-        self.planeXY = HashEncoder(input_dim=2, level_dim=2, num_levels=16, log2_hashmap_size=19, desired_resolution=2048, output_dim=8, num_layers=2, hidden_dim=64)
-        self.planeYZ = HashEncoder(input_dim=2, level_dim=2, num_levels=16, log2_hashmap_size=19, desired_resolution=2048, output_dim=8, num_layers=2, hidden_dim=64)
-        self.planeXZ = HashEncoder(input_dim=2, level_dim=2, num_levels=16, log2_hashmap_size=19, desired_resolution=2048, output_dim=8, num_layers=2, hidden_dim=64)
+        # if self.opt.use_triplane:
+        self.planeXY = Plane(level_dim=2, num_levels=16, log2_hashmap_size=19, desired_resolution=2048, output_dim=8, num_layers=2, hidden_dim=32)
+        self.planeYZ = Plane(level_dim=2, num_levels=16, log2_hashmap_size=19, desired_resolution=2048, output_dim=8, num_layers=2, hidden_dim=32)
+        self.planeXZ = Plane(level_dim=2, num_levels=16, log2_hashmap_size=19, desired_resolution=2048, output_dim=8, num_layers=2, hidden_dim=32)
 
         # view-dependency
         self.view_encoder, self.view_in_dim = get_encoder('frequency', input_dim=3, multires=4)
@@ -79,27 +149,33 @@ class NeRFNetwork(NeRFRenderer):
 
     def common_forward(self, x):
         
-        f_grid = self.quantize_feature(self.grid(x, self.bound))
-        f_plane_01 = self.quantize_feature(self.planeXY(x[..., [0, 1]], self.bound))
-        f_plane_12 = self.quantize_feature(self.planeYZ(x[..., [1, 2]], self.bound))
-        f_plane_02 = self.quantize_feature(self.planeXZ(x[..., [0, 2]], self.bound))
-
-        f = f_grid + f_plane_01 + f_plane_12 + f_plane_02
-
+        f = 0
+        if self.opt.use_grid:
+            f_grid = self.quantize_feature(self.grid(x, self.bound))
+            f = f + f_grid
+        if self.opt.use_triplane:
+            f_plane_01 = self.quantize_feature(self.planeXY(x[..., [0, 1]], self.bound))
+            f_plane_12 = self.quantize_feature(self.planeYZ(x[..., [1, 2]], self.bound))
+            f_plane_02 = self.quantize_feature(self.planeXZ(x[..., [0, 2]], self.bound))
+            f = f + f_plane_01 + f_plane_12 + f_plane_02
+        
         f_sigma = f[..., 0]
         f_diffuse = f[..., 1:4]
         f_specular = f[..., 4:]
 
         return f_sigma, f_diffuse, f_specular
     
-    def quantize_feature(self, f):
-        f[..., 0] = self.quantize(f[..., 0], 14)
-        f[..., 1:] = self.quantize(f[..., 1:], 7)
+    def quantize_feature(self, f, baking=False):
+        f[..., 0] = self.quantize(f[..., 0], 14, baking)
+        f[..., 1:] = self.quantize(f[..., 1:], 7, baking)
         return f
     
-    def quantize(self, x, m=7):
+    def quantize(self, x, m=7, baking=False):
         # x: in real value, to be quantized in to [-m, m]
         x = torch.sigmoid(x)
+
+        if baking: return 255 * x
+        
         x = x + (torch.floor(255 * x + 0.5) / 255 - x).detach()
         x = 2 * m * x - m
         return x
@@ -139,7 +215,8 @@ class NeRFNetwork(NeRFRenderer):
 
         # proposal network
         if proposal >= 0 and proposal < len(self.prop_encoders):
-            sigma = trunc_exp(self.prop_mlp[proposal](self.prop_encoders[proposal](x, bound=self.bound)).squeeze(-1) - 1)
+            x = (x + self.bound) / (2 * self.bound)
+            sigma = trunc_exp(self.prop_mlp[proposal](self.prop_encoders[proposal](x)).squeeze(-1) - 1)
         # final NeRF
         else:
             f_sigma, f_diffuse, f_specular = self.common_forward(x)
@@ -151,7 +228,8 @@ class NeRFNetwork(NeRFRenderer):
     
 
     def apply_total_variation(self, lambda_tv):
-        self.grid.grad_total_variation(lambda_tv)
+        if self.opt.use_grid:
+            self.grid.grad_total_variation(lambda_tv)
         # self.planeXY.grad_total_variation(lambda_tv * 0.1)
         # self.planeXZ.grad_total_variation(lambda_tv * 0.1)
         # self.planeYZ.grad_total_variation(lambda_tv * 0.1)
@@ -159,15 +237,21 @@ class NeRFNetwork(NeRFRenderer):
     # optimizer utils
     def get_params(self, lr):
 
-        params = []
+        params = [
+            {'params': self.view_mlp.parameters(), 'lr': lr},
+        ]
 
-        params.extend([
-            {'params': self.grid.parameters(), 'lr': lr},
-            {'params': self.planeXY.parameters(), 'lr': lr},
-            {'params': self.planeYZ.parameters(), 'lr': lr}, 
-            {'params': self.planeXZ.parameters(), 'lr': lr},
-            {'params': self.view_mlp.parameters(), 'lr': lr}, 
-        ])
+        if self.opt.use_grid:
+            params.extend([
+                {'params': self.grid.parameters(), 'lr': lr},
+            ])
+        
+        if self.opt.use_triplane:
+            params.extend([
+                {'params': self.planeXY.parameters(), 'lr': lr},
+                {'params': self.planeYZ.parameters(), 'lr': lr}, 
+                {'params': self.planeXZ.parameters(), 'lr': lr},
+            ])
 
         if not self.opt.cuda_ray:
             params.extend([

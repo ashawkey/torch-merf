@@ -474,6 +474,9 @@ class NeRFRenderer(nn.Module):
             results['weights'] = weights
             results['alphas'] = alphas
 
+            if outputs['specular'] is not None:
+                results['specular'] = outputs['specular']
+
             if self.opt.lambda_proposal > 0 and update_proposal:
                 results['proposal_loss'] = proposal_loss(all_bins, all_weights)
             
