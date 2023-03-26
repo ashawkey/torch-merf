@@ -31,11 +31,6 @@ __host__ __device__ inline T div_round_up(T val, T divisor) {
     return (val + divisor - 1) / divisor;
 }
 
-template <typename T, typename T2>
-__host__ __device__ inline T clamp(const T v, const T2 lo, const T2 hi) {
-  return min(max(v, lo), hi);
-}
-
 template <typename T>
 __device__ inline T smoothstep(T val) {
 	return val*val*(3.0f - 2.0f * val);
@@ -64,14 +59,14 @@ __device__ uint32_t fast_hash(const uint32_t pos_grid[D]) {
 
 
 template <uint32_t D, uint32_t C>
-__device__ uint32_t get_grid_index(const uint32_t gridtype, const bool align_corners, const uint32_t ch, const uint32_t hashmap_size, const uint32_t resolution, const uint32_t pos_grid[D]) {
+__device__ uint32_t get_grid_index(const uint32_t gridtype, const uint32_t ch, const uint32_t hashmap_size, const uint32_t resolution, const uint32_t pos_grid[D]) {
     uint32_t stride = 1;
     uint32_t index = 0;
 
     #pragma unroll
     for (uint32_t d = 0; d < D && stride <= hashmap_size; d++) {
         index += pos_grid[d] * stride;
-        stride *= align_corners ? resolution: (resolution + 1);
+        stride *= resolution;
     }
 
     // NOTE: for NeRF, the hash is in fact not necessary. Check https://github.com/NVlabs/instant-ngp/issues/97.
@@ -135,8 +130,7 @@ __global__ void kernel_grid(
     }
 
     const uint32_t hashmap_size = offsets[level + 1] - offsets[level];
-    const float scale = exp2f(level * S) * H - 1.0f;
-    const uint32_t resolution = (uint32_t)ceil(scale) + 1;
+    const uint32_t resolution = (uint32_t)ceil(exp2f(level * S) * H);
     
     // calculate coordinate (always use float for precision!)
     float pos[D];
@@ -145,9 +139,17 @@ __global__ void kernel_grid(
 
     #pragma unroll
     for (uint32_t d = 0; d < D; d++) {
-        pos[d] = inputs[d] * scale + (align_corners ? 0.0f : 0.5f);
-        pos_grid[d] = floorf(pos[d]);
+        
+        // align_corners
+        if (align_corners) {
+            pos[d] = inputs[d] * (float)(resolution - 1); // [0, resolution - 1]
+            pos_grid[d] = min((uint32_t)floorf(pos[d]), resolution - 2); // left-top corner, [0, resolution - 2]
+        } else {
+            pos[d] = fminf(fmaxf(inputs[d] * (float)resolution - 0.5f, 0.0f), (float)(resolution - 1)); // [-0.5, resolution-0.5] --> [0, resolution - 1]
+            pos_grid[d] = (uint32_t)floorf(pos[d]); // left-top corner, [0, resolution - 1]
+        }
         pos[d] -= (float)pos_grid[d];
+
         // smoothstep instead of linear
         if (interp == 1) {
             pos_deriv[d] = smoothstep_derivative(pos[d]);
@@ -177,11 +179,11 @@ __global__ void kernel_grid(
                 pos_grid_local[d] = pos_grid[d];
             } else {
                 w *= pos[d];
-                pos_grid_local[d] = pos_grid[d] + 1;
+                pos_grid_local[d] = min(pos_grid[d] + 1, resolution - 1);
             }
         }
 
-        uint32_t index = get_grid_index<D, C>(gridtype, align_corners, 0, hashmap_size, resolution, pos_grid_local);
+        uint32_t index = get_grid_index<D, C>(gridtype, 0, hashmap_size, resolution, pos_grid_local);
 
         // writing to register (fast)
         #pragma unroll
@@ -211,7 +213,7 @@ __global__ void kernel_grid(
 
             #pragma unroll
             for (uint32_t idx = 0; idx < (1 << (D - 1)); idx++) {
-                float w = scale;
+                float w = (float)(align_corners ? resolution - 1 : resolution);
                 uint32_t pos_grid_local[D];
 
                 #pragma unroll
@@ -223,14 +225,14 @@ __global__ void kernel_grid(
                         pos_grid_local[d] = pos_grid[d];
                     } else {
                         w *= pos[d];
-                        pos_grid_local[d] = pos_grid[d] + 1;
+                        pos_grid_local[d] = min(pos_grid[d] + 1, resolution - 1);
                     }
                 }
 
                 pos_grid_local[gd] = pos_grid[gd];
-                uint32_t index_left = get_grid_index<D, C>(gridtype, align_corners, 0, hashmap_size, resolution, pos_grid_local);
-                pos_grid_local[gd] = pos_grid[gd] + 1;
-                uint32_t index_right = get_grid_index<D, C>(gridtype, align_corners, 0, hashmap_size, resolution, pos_grid_local);
+                uint32_t index_left = get_grid_index<D, C>(gridtype, 0, hashmap_size, resolution, pos_grid_local);
+                pos_grid_local[gd] = min(pos_grid[gd] + 1, resolution - 1);
+                uint32_t index_right = get_grid_index<D, C>(gridtype, 0, hashmap_size, resolution, pos_grid_local);
 
                 #pragma unroll
                 for (uint32_t ch = 0; ch < C; ch++) {
@@ -271,8 +273,7 @@ __global__ void kernel_grid_backward(
     grad += level * B * C + b * C + ch; // L, B, C
 
     const uint32_t hashmap_size = offsets[level + 1] - offsets[level];
-    const float scale = exp2f(level * S) * H - 1.0f;
-    const uint32_t resolution = (uint32_t)ceil(scale) + 1;
+    const uint32_t resolution = (uint32_t)ceil(exp2f(level * S) * H);
 
     // check input range (should be in [0, 1])
     #pragma unroll
@@ -288,8 +289,14 @@ __global__ void kernel_grid_backward(
 
     #pragma unroll
     for (uint32_t d = 0; d < D; d++) {
-        pos[d] = inputs[d] * scale + (align_corners ? 0.0f : 0.5f);
-        pos_grid[d] = floorf(pos[d]);
+        // align_corners
+        if (align_corners) {
+            pos[d] = inputs[d] * (float)(resolution - 1); // [0, resolution - 1]
+            pos_grid[d] = min((uint32_t)floorf(pos[d]), resolution - 2); // left-top corner, [0, resolution - 2]
+        } else {
+            pos[d] = fminf(fmaxf(inputs[d] * (float)resolution - 0.5f, 0.0f), (float)(resolution - 1)); // [-0.5, resolution-0.5] --> [0, resolution - 1]
+            pos_grid[d] = (uint32_t)floorf(pos[d]); // left-top corner, [0, resolution - 1]
+        }
         pos[d] -= (float)pos_grid[d];
         // smoothstep instead of linear
         if (interp == 1) {
@@ -316,11 +323,11 @@ __global__ void kernel_grid_backward(
                 pos_grid_local[d] = pos_grid[d];
             } else {
                 w *= pos[d];
-                pos_grid_local[d] = pos_grid[d] + 1;
+                pos_grid_local[d] = min(pos_grid[d] + 1, resolution - 1);
             }
         }
 
-        uint32_t index = get_grid_index<D, C>(gridtype, align_corners, ch, hashmap_size, resolution, pos_grid_local);
+        uint32_t index = get_grid_index<D, C>(gridtype, ch, hashmap_size, resolution, pos_grid_local);
 
         // atomicAdd for __half is slow (especially for large values), so we use __half2 if N_C % 2 == 0
         // TODO: use float which is better than __half, if N_C % 2 != 0
@@ -540,8 +547,7 @@ __global__ void kernel_grad_tv(
     if (flag_oob) return;
 
     const uint32_t hashmap_size = offsets[level + 1] - offsets[level];
-    const float scale = exp2f(level * S) * H - 1.0f;
-    const uint32_t resolution = (uint32_t)ceil(scale) + 1;
+    const uint32_t resolution = (uint32_t)ceil(exp2f(level * S) * H);
     
     // calculate coordinate
     float pos[D];
@@ -549,9 +555,14 @@ __global__ void kernel_grad_tv(
 
     #pragma unroll
     for (uint32_t d = 0; d < D; d++) {
-        pos[d] = inputs[d] * scale + (align_corners ? 0.0f : 0.5f);
-        pos_grid[d] = floorf(pos[d]);
-        // pos[d] -= (float)pos_grid[d]; // not used
+        // align_corners
+        if (align_corners) {
+            pos[d] = inputs[d] * (float)(resolution - 1); // [0, resolution - 1]
+            pos_grid[d] = min((uint32_t)floorf(pos[d]), resolution - 2); // left-top corner, [0, resolution - 2]
+        } else {
+            pos[d] = fminf(fmaxf(inputs[d] * (float)resolution - 0.5f, 0.0f), (float)(resolution - 1)); // [-0.5, resolution-0.5] --> [0, resolution - 1]
+            pos_grid[d] = (uint32_t)floorf(pos[d]); // left-top corner, [0, resolution - 1]
+        }
     }
 
     //printf("[b=%d, l=%d] pos=(%f, %f)+(%d, %d)\n", b, level, pos[0], pos[1], pos_grid[0], pos_grid[1]);
@@ -560,7 +571,7 @@ __global__ void kernel_grad_tv(
     scalar_t results[C] = {0}; // temp results in register
     scalar_t idelta[C] = {0};
 
-    uint32_t index = get_grid_index<D, C>(gridtype, align_corners, 0, hashmap_size, resolution, pos_grid);
+    uint32_t index = get_grid_index<D, C>(gridtype, 0, hashmap_size, resolution, pos_grid);
 
     scalar_t w = weight / (2 * D);
 
@@ -573,11 +584,10 @@ __global__ void kernel_grad_tv(
         // right side
         if (cur_d < resolution) {
             pos_grid[d] = cur_d + 1;
-            uint32_t index_right = get_grid_index<D, C>(gridtype, align_corners, 0, hashmap_size, resolution, pos_grid);
+            uint32_t index_right = get_grid_index<D, C>(gridtype, 0, hashmap_size, resolution, pos_grid);
 
             #pragma unroll
             for (uint32_t ch = 0; ch < C; ch++) {
-                // results[ch] += w * clamp(grid[index + ch] - grid[index_right + ch], -1.0f, 1.0f);
                 grad_val = (grid[index + ch] - grid[index_right + ch]);
                 results[ch] += grad_val;
                 idelta[ch] += grad_val * grad_val;
@@ -587,11 +597,10 @@ __global__ void kernel_grad_tv(
         // left side
         if (cur_d > 0) {
             pos_grid[d] = cur_d - 1;
-            uint32_t index_left = get_grid_index<D, C>(gridtype, align_corners, 0, hashmap_size, resolution, pos_grid);
+            uint32_t index_left = get_grid_index<D, C>(gridtype, 0, hashmap_size, resolution, pos_grid);
 
             #pragma unroll
             for (uint32_t ch = 0; ch < C; ch++) {
-                // results[ch] += w * clamp(grid[index + ch] - grid[index_left + ch], -1.0f, 1.0f);
                 grad_val = (grid[index + ch] - grid[index_left + ch]);
                 results[ch] += grad_val;
                 idelta[ch] += grad_val * grad_val;

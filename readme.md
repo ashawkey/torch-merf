@@ -1,8 +1,8 @@
-# torch-MeRF
+# torch-MeRF (work-in-progress)
 
 An unofficial pytorch implementation of [MeRF: Memory-Efficient Radiance Fields for Real-time View Synthesis in Unbounded Scenes](https://merf42.github.io/).
 
-We support exporting almost lossless baked assets for the real-time web renderer.
+We support **exporting almost lossless baked assets for real-time webGL rendering**.
 
 # Install
 
@@ -48,18 +48,20 @@ python scripts/colmap2nerf.py --images ./data/custom/images/ --run_colmap # if u
 ### Basics
 First time running will take some time to compile the CUDA extensions.
 ```bash
-# train (and test after finishing)
+## train
 python main.py data/bonsai/ --workspace trial_bonsai --enable_cam_center --downscale 4
 
-# test (export video and baked assets)
+## test (export video and baked assets)
 python main.py data/bonsai/ --workspace trial_bonsai --enable_cam_center --downscale 4 --test
+# the default baking can be very slow (30 min+): it renders all images at full resolution from the training dataset. Use --fast_baking to speed up (just ~1min) at the cost of possibily missing some background blocks:
+python main.py data/bonsai/ --workspace trial_bonsai --enable_cam_center --downscale 4 --test --test_no_video --fast_baking
 
-# web renderer
+## web renderer
 # use VS Code to host the folder and open ./renderer/renderer.html
 # follow the instructions and add the baked assets path as URL parameters to start rendering.
 # for example:
-http://localhost:5500/renderer/renderer.html?dir=trial_bonsai/assets
-http://localhost:5500/renderer/renderer.html?dir=trial_bonsai/assets&quality=low # phone, low, medium, high
+http://localhost:5500/renderer/renderer.html?dir=../trial_bonsai/assets
+http://localhost:5500/renderer/renderer.html?dir=../trial_bonsai/assets&quality=low # phone, low, medium, high
 ```
 
 Please check the `scripts` directory for more examples on common datasets, and check `main.py` for all options.
@@ -67,9 +69,9 @@ Please check the `scripts` directory for more examples on common datasets, and c
 ### Implementation Notes
 
 #### Modification of web renderer
-The web renderer is slightly modified from the official version:
+The web renderer is slightly modified from the official version, so it is not compatible with the original assets.
 
-* Frequency encoding convention (viewdependency.glsl):
+* Frequency encoding convention (`viewdependency.glsl`):
     ```bash
     # original
     x, sin(x), sin(2x), sin(4x), ..., cos(x), cos(2x), cos(4x), ...
@@ -77,7 +79,7 @@ The web renderer is slightly modified from the official version:
     x, sin(x), cos(x), sin(2x), cos(2x), sin(4x), cos(4x), ...
     ```
 
-* Interpolation alignment of sparse grid (fragment.glsl):
+* Interpolation alignment of sparse grid (`fragment.glsl`):
     ```cpp
     // original
     vec3 posSparseGrid = (z - minPosition) / voxelSize - 0.5;
@@ -101,26 +103,30 @@ $$
 In this implementation we have to manually perform bilinear/trilinear interpolation in torch, and query the 4/8 corners of the grid for each sampling point, which is quite inefficient...
 
 #### Interpolation alignment
-
 OpenGL's `texture()` behaves like the `F.interpolate(..., align_corners=False)`.
 It seems the sparse grid uses `align_corners=True` convention, while the triplane uses `align_corners=False` convention... but maybe I'm wrong somewhere, since I have to modify the web renderer to make it work.
 
 #### gridencoder
-The API is slightly abused for convenience, we need to pass in values in the range of [0, 1] (the `bound` parameter is removed).
+The default API is slightly modified for convenience, we need to pass in values in the range of [0, 1] (the `bound` parameter is removed).
 
-### Performance reference 
+### Performance reference (TODO)
 
 |        | Bonsai | Counter | Kitchen | Room | Bicycle | Garden | Stump |
 | ---    | --- | --- | --- | --- | --- | --- | --- |
-| MipNeRF 360 (~days)              | 33.46 | 29.55 | 32.23 | 31.63 | 24.57 | 26.98 | 26.40 | 
-| baseline-nerfacto (~12 minutes)  | 31.10 | 26.65 | 30.61 | 31.44 | 23.74 | 25.31 | 25.48 |
+| MipNeRF 360 (~days)            | 33.46 | 29.55 | 32.23 | 31.63 | 24.57 | 26.98 | 26.40 | 
+| nerfacto (~12 minutes)         | 31.10 | 26.65 | 30.61 | 31.44 | 23.74 | 25.31 | 25.48 |
 
 Ours are tested on a V100. 
 Please check the commands under `scripts/` to reproduce.
 
 ### Acknowledgement
-This repository is based on:
-* [torch-ngp](https://github.com/ashawkey/torch-ngp)
-* [DearPyGui](https://github.com/hoffstadt/DearPyGui)
-* [nerfstudio](https://github.com/nerfstudio-project/nerfstudio)
-* [nerfacc](https://github.com/KAIR-BAIR/nerfacc)
+
+The original paper:
+```
+@article{reiser2023merf,
+  title={MERF: Memory-Efficient Radiance Fields for Real-time View Synthesis in Unbounded Scenes},
+  author={Reiser, Christian and Szeliski, Richard and Verbin, Dor and Srinivasan, Pratul P and Mildenhall, Ben and Geiger, Andreas and Barron, Jonathan T and Hedman, Peter},
+  journal={arXiv preprint arXiv:2302.12249},
+  year={2023}
+}
+```

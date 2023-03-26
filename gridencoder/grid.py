@@ -126,7 +126,7 @@ class GridEncoder(nn.Module):
         self.max_params = 2 ** log2_hashmap_size
         for i in range(num_levels):
             resolution = int(np.ceil(base_resolution * per_level_scale ** i))
-            params_in_level = min(self.max_params, (resolution if align_corners else resolution + 1) ** input_dim) # limit max number
+            params_in_level = min(self.max_params, (resolution) ** input_dim) # limit max number
             params_in_level = int(np.ceil(params_in_level / 8) * 8) # make divisible
             offsets.append(offset)
             offset += params_in_level

@@ -14,7 +14,10 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--ckpt', type=str, default='latest')
     parser.add_argument('--fp16', action='store_true', help="use amp mixed precision training")
-
+    parser.add_argument('--fast_baking', action='store_true', help="faster baking at the cost of maybe missing blocks at background")
+    
+    ### model options
+    parser.add_argument('--backbone', type=str, default='default', choices=['default', 'linear'], help="backbone type")
     parser.add_argument('--use_grid', type=int, default=1)
     parser.add_argument('--use_triplane', type=int, default=1)
 
@@ -48,7 +51,7 @@ if __name__ == '__main__':
     parser.add_argument('--max_steps', type=int, default=1024, help="max num steps sampled per ray (only valid when using --cuda_ray)")
     parser.add_argument('--num_steps', type=int, nargs='*', default=[256, 96, 48], help="num steps sampled per ray for each proposal level (only valid when NOT using --cuda_ray)")
     parser.add_argument('--contract', action='store_true', help="apply spatial contraction as in mip-nerf 360, only work for bound > 1, will override bound to 2.")
-    parser.add_argument('--background', type=str, default='white', choices=['white', 'random', 'last_sample'], help="training background mode")
+    parser.add_argument('--background', type=str, default='random', choices=['white', 'random', 'last_sample'], help="training background mode")
 
     parser.add_argument('--update_extra_interval', type=int, default=16, help="iter interval to update extra status (only valid when using --cuda_ray)")
     parser.add_argument('--max_ray_batch', type=int, default=4096 * 2, help="batch size of rays at inference to avoid OOM (only valid when NOT using --cuda_ray)")
@@ -68,7 +71,7 @@ if __name__ == '__main__':
     parser.add_argument('--lambda_tv', type=float, default=0, help="loss scale")
     parser.add_argument('--lambda_proposal', type=float, default=1, help="loss scale (only for non-cuda-ray mode)")
     parser.add_argument('--lambda_distort', type=float, default=0.01, help="loss scale (only for non-cuda-ray mode)")
-    parser.add_argument('--lambda_specular', type=float, default=2e-5, help="loss scale")
+    parser.add_argument('--lambda_specular', type=float, default=1e-5, help="loss scale")
 
     ### GUI options
     parser.add_argument('--vis_pose', action='store_true', help="visualize the poses")
@@ -105,7 +108,11 @@ if __name__ == '__main__':
     
     seed_everything(opt.seed)
     
-    from nerf.network import NeRFNetwork
+    if opt.backbone == 'linear':
+        from nerf.network_linear import NeRFNetwork
+    else:
+        from nerf.network import NeRFNetwork
+        
     model = NeRFNetwork(opt)
     
     # criterion = torch.nn.MSELoss(reduction='none')
@@ -133,7 +140,10 @@ if __name__ == '__main__':
             
             if not opt.test_no_baking:
                 all_loader = NeRFDataset(opt, device=device, type=opt.train_split)
-                all_loader.training = False # load full image from train split
+                if opt.fast_baking:
+                    opt.num_rays = 4096 * 8 # load more random pixels from train split
+                else:
+                    all_loader.training = False # load full image from train split
                 trainer.save_baking(loader=all_loader.dataloader())
         
     else:
@@ -178,5 +188,8 @@ if __name__ == '__main__':
             trainer.test(test_loader, write_video=True) # test and save video
 
             all_loader = NeRFDataset(opt, device=device, type=opt.train_split)
-            all_loader.training = False # load full image from train split
+            if opt.fast_baking:
+                opt.num_rays = 4096 * 8 # load more random pixels from train split
+            else:
+                all_loader.training = False # load full image from train split
             trainer.save_baking(loader=all_loader.dataloader())
