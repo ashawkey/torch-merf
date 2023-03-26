@@ -2,6 +2,10 @@
 
 An unofficial pytorch implementation of [MeRF: Memory-Efficient Radiance Fields for Real-time View Synthesis in Unbounded Scenes](https://merf42.github.io/).
 
+
+https://user-images.githubusercontent.com/25863658/227784848-b8a34143-982d-425f-b24e-9a7e172c17af.mp4
+
+
 We support **exporting almost lossless baked assets for real-time webGL rendering**.
 
 # Install
