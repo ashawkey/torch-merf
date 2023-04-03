@@ -1,4 +1,4 @@
-# torch-MeRF (work-in-progress)
+# torch-MeRF
 
 An unofficial pytorch implementation of [MeRF: Memory-Efficient Radiance Fields for Real-time View Synthesis in Unbounded Scenes](https://merf42.github.io/).
 
@@ -128,7 +128,7 @@ It seems the sparse grid uses `align_corners=True` convention, while the triplan
 #### gridencoder
 The default API is slightly modified for convenience, we need to pass in values in the range of [0, 1] (the `bound` parameter is removed).
 
-### Performance reference (TODO)
+### Performance reference
 
 |        | Bonsai | Counter | Kitchen | Room | Bicycle | Garden | Stump |
 | ---    | --- | --- | --- | --- | --- | --- | --- |
