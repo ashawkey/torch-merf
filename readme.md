@@ -53,7 +53,13 @@ python scripts/colmap2nerf.py --images ./data/custom/images/ --run_colmap # if u
 First time running will take some time to compile the CUDA extensions.
 ```bash
 ## train
+# mip-nerf 360
 python main.py data/bonsai/ --workspace trial_bonsai --enable_cam_center --downscale 4
+# front-facing
+python main.py data/nerf_llff_data/fern --workspace trial_fern --downscale 4
+# nerf-like (need to specify --scale manually)
+python main.py data/fox/ --workspace trial_fox --data_format nerf --scale 0.3
+
 
 ## test (export video and baked assets)
 python main.py data/bonsai/ --workspace trial_bonsai --enable_cam_center --downscale 4 --test
@@ -66,6 +72,15 @@ python main.py data/bonsai/ --workspace trial_bonsai --enable_cam_center --downs
 # for example:
 http://localhost:5500/renderer/renderer.html?dir=../trial_bonsai/assets
 http://localhost:5500/renderer/renderer.html?dir=../trial_bonsai/assets&quality=low # phone, low, medium, high
+
+## dense depth supervision (experimental)
+cd depth_tools
+bash download_models.sh
+cd ..
+
+python depth_tools/extract_depth.py --in_dir data/room/images_4 --out_dir data/room/depths
+
+python main.py data/room/ --workspace trial_room --enable_cam_center --downscale 4 --enable_dense_depth
 ```
 
 Please check the `scripts` directory for more examples on common datasets, and check `main.py` for all options.
@@ -119,6 +134,9 @@ The default API is slightly modified for convenience, we need to pass in values 
 | ---    | --- | --- | --- | --- | --- | --- | --- |
 | MipNeRF 360 (~days)            | 33.46 | 29.55 | 32.23 | 31.63 | 24.57 | 26.98 | 26.40 | 
 | nerfacto (~12 minutes)         | 31.10 | 26.65 | 30.61 | 31.44 | 23.74 | 25.31 | 25.48 |
+| this impl (~1 hour)            | 27.81 | 25.40 | 27.15 | 29.17 | 22.29 | 24.25 | 23.70 |
+
+This implmentation (v.s. paper): Indoor 27.38 (v.s. 27.80), Ourdoor 23.41 (v.s. 23.19)
 
 Ours are tested on a V100. 
 Please check the commands under `scripts/` to reproduce.

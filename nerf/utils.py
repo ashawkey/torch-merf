@@ -524,6 +524,17 @@ class Trainer(object):
         # MSE loss
         pred_rgb = outputs['image']
         loss = self.criterion(pred_rgb, gt_rgb).mean(-1) # [N, 3] --> [N]
+
+        # depth loss
+        if 'depth' in data:
+            gt_depth = data['depth'].view(-1, 1)
+            pred_depth = outputs['depth'].view(-1, 1)
+
+            lambda_depth = self.opt.lambda_depth * min(1.0, self.global_step / 1000)
+            mask = gt_depth > 0
+
+            loss_depth = self.criterion(pred_depth * mask, gt_depth * mask) # [N]
+            loss = loss + lambda_depth * loss_depth
     
         loss = loss.mean()
 
@@ -536,7 +547,7 @@ class Trainer(object):
 
         if 'distort_loss' in outputs and self.opt.lambda_distort > 0:
             # progressive to avoid bad init
-            lambda_distort = min(1.0, self.global_step / 3000) * self.opt.lambda_distort
+            lambda_distort = min(1.0, self.global_step / (0.5 * self.opt.iters)) * self.opt.lambda_distort
             loss = loss + lambda_distort * outputs['distort_loss']
 
         if self.opt.lambda_entropy > 0:
@@ -737,7 +748,6 @@ class Trainer(object):
 
         # convert coords to 9x9x9 xyzs
         xyzs_000 = (coords / AS) * 2 * bound - bound # [N, 3], left-top point of the 9x9x9 block
-
         grid_size = 2 * bound / AS
         step_size = grid_size / BS
         

@@ -214,9 +214,11 @@ class ColmapDataset:
 
         # process pts3d into sparse depth data.
 
-        if self.type != 'test':
+        # if self.type != 'test':
+        if self.training:
         
             self.cam_near_far = [] # always extract this infomation
+            self.dense_depth_info = [] if self.opt.enable_dense_depth else None
             
             print(f'[INFO] extracting sparse depth info...')
             # map from colmap points3d dict key to dense array index
@@ -254,14 +256,65 @@ class ColmapDataset:
                 # camera near far
                 # self.cam_near_far.append([np.percentile(depth, 0.1), np.percentile(depth, 99.9)])
                 self.cam_near_far.append([np.min(depth), np.max(depth)])
+            
+                # dense depth info
+                if self.opt.enable_dense_depth:
+
+                    depth_path = os.path.join(self.root_path, 'depths', os.path.splitext(os.path.basename(imdata[k].name))[0] + '.npy')
+
+                    if not os.path.exists(depth_path):
+                        # call depth estimation automatically.
+                        raise RuntimeError('[ERROR] depth estimation not found, please run `python depth_tools/extract_depth.py`')
+
+                    dense_depth = np.load(depth_path) # [h, w]
+
+                    # interpolate to current resolution
+                    dense_depth = cv2.resize(dense_depth, (self.W, self.H), interpolation=cv2.INTER_LINEAR)
+
+                    # map dense to sparse depth by solving a weighted least square problem
+                    from sklearn.linear_model import RANSACRegressor
+
+                    X = dense_depth[tuple(xys.T)].reshape(-1, 1) # [M], dense
+                    Y = depth.reshape(-1) # [M], sparse
+                    W = weight.reshape(-1)
+
+                    LR = RANSACRegressor().fit(X, Y, W)
+                    scale = LR.estimator_.coef_[0]
+                    bias = LR.estimator_.intercept_
+
+                    score = np.mean((X * scale + bias - Y) ** 2)
+
+                    # must be wrong... use the most confident two samples.
+                    if scale < 0:
+                        idx_by_conf = np.argsort(W)[::-1]
+                        x0, y0 = X[idx_by_conf[0]][0], Y[idx_by_conf[0]]
+                        x1, y1 = X[idx_by_conf[1]][0], Y[idx_by_conf[1]]
+                        scale = (y0 - y1) / (x0 - x1)
+                        bias = y0 - x0 * scale
+                        score = np.mean((X * scale + bias - Y) ** 2)
+                    
+                        # if still wrong, use the most confident ONE sample...
+                        if scale < 0:
+                            scale = y0 / x0
+                            bias = 0
+                            score = np.mean((X * scale + bias - Y) ** 2)
+
+                    # print(f'[INFO] estimate dense depth scale by linear regression: MSE = {score:.4f}, scale = {scale:.4f}, bias = {bias:.4f}')
+
+                    dense_depth = dense_depth * scale + bias
+
+                    self.dense_depth_info.append(dense_depth)                
 
             print(f'[INFO] extracted {_mean_valid_sparse_depth / len(imkeys):.2f} valid sparse depth on average per image')
 
             self.cam_near_far = torch.from_numpy(np.array(self.cam_near_far, dtype=np.float32)) # [N, 2]
 
+            if self.opt.enable_dense_depth:
+                self.dense_depth_info = torch.from_numpy(np.stack(self.dense_depth_info, axis=0))
           
         else: # test time: no depth info
             self.cam_near_far = None
+            self.dense_depth_info = None
 
 
         # make split
@@ -336,12 +389,16 @@ class ColmapDataset:
                 img_paths = img_paths[train_ids]
                 if self.cam_near_far is not None:
                     self.cam_near_far = self.cam_near_far[train_ids]
+                if self.dense_depth_info is not None:
+                    self.dense_depth_info = self.dense_depth_info[train_ids]
             elif self.type == 'val':
                 self.poses = self.poses[val_ids]
                 self.intrinsics = self.intrinsics[val_ids]
                 img_paths = img_paths[val_ids]
                 if self.cam_near_far is not None:
                     self.cam_near_far = self.cam_near_far[val_ids]
+                if self.dense_depth_info is not None:
+                    self.dense_depth_info = self.dense_depth_info[val_ids]
             # else: trainval use all.
             
             # read images
@@ -401,6 +458,8 @@ class ColmapDataset:
                 self.images = self.images.to(self.device)
             if self.cam_near_far is not None:
                 self.cam_near_far = self.cam_near_far.to(self.device)
+            if self.dense_depth_info is not None:
+                self.dense_depth_info = self.dense_depth_info.to(self.device)
             self.mvps = self.mvps.to(self.device)
 
 
@@ -425,10 +484,15 @@ class ColmapDataset:
         mvp = self.mvps[index].to(self.device)
         results['mvp'] = mvp
 
+        depth = None
+
         if self.images is not None:
             
             if self.training:
                 images = self.images[index, rays['j'], rays['i']].float().to(self.device) / 255 # [N, 3/4]
+
+                if self.opt.enable_dense_depth:
+                    depth = self.dense_depth_info[index, rays['j'], rays['i']].float().to(self.device) # [N]
             else:
                 images = self.images[index].squeeze(0).float().to(self.device) / 255 # [H, W, 3/4]
 
@@ -445,6 +509,8 @@ class ColmapDataset:
         results['rays_o'] = rays['rays_o']
         results['rays_d'] = rays['rays_d']
         results['index'] = index
+        if depth is not None:
+            results['depth'] = depth
 
         return results
 

@@ -193,157 +193,7 @@ class NeRFRenderer(nn.Module):
         self.aabb_infer = self.aabb_train.clone()
         print(f'[INFO] update_aabb: {self.aabb_train.cpu().numpy().tolist()}')
 
-    # @torch.no_grad()
-    # def export_baking(self, save_path, dataset, S=128):
-
-        
-
-    #     # query all cameras in dataset
-
-    #     ############################################
-
-    #     # sigmas = np.zeros([resolution] * 3, dtype=np.float32)
-    #     sigmas = torch.zeros([resolution] * 3, dtype=torch.float32, device=device)
-
-    #     # query
-    #     X = torch.linspace(-1, 1, resolution).split(S)
-    #     Y = torch.linspace(-1, 1, resolution).split(S)
-    #     Z = torch.linspace(-1, 1, resolution).split(S)
-
-    #     for xi, xs in enumerate(X):
-    #         for yi, ys in enumerate(Y):
-    #             for zi, zs in enumerate(Z):
-    #                 xx, yy, zz = custom_meshgrid(xs, ys, zs)
-    #                 pts = torch.cat([xx.reshape(-1, 1), yy.reshape(-1, 1), zz.reshape(-1, 1)], dim=-1) # [S, 3]
-    #                 with torch.cuda.amp.autocast(enabled=self.opt.fp16):
-    #                     val = self.density(pts.to(device))['sigma'].reshape(len(xs), len(ys), len(zs)) # [S, 1] --> [x, y, z]
-    #                 sigmas[xi * S: xi * S + len(xs), yi * S: yi * S + len(ys), zi * S: zi * S + len(zs)] = val
-
-    #     # use the density_grid as a baseline mask (also excluding untrained regions)
-    #     if self.cuda_ray:
-    #         mask = torch.zeros([self.grid_size] * 3, dtype=torch.float32, device=device)
-    #         all_indices = torch.arange(self.grid_size**3, device=device, dtype=torch.int)
-    #         all_coords = raymarching.morton3D_invert(all_indices).long()
-    #         mask[tuple(all_coords.T)] = self.density_grid[0]
-    #         mask = F.interpolate(mask.unsqueeze(0).unsqueeze(0), size=[resolution] * 3, mode='nearest').squeeze(0).squeeze(0)
-    #         mask = (mask > density_thresh)
-    #         sigmas = sigmas * mask
-
-    #     sigmas = torch.nan_to_num(sigmas, 0)
-    #     sigmas = sigmas.cpu().numpy()
-
-    #     vertices, triangles = mcubes.marching_cubes(sigmas, density_thresh)
-
-    #     vertices = vertices / (resolution - 1.0) * 2 - 1
-    #     vertices = vertices.astype(np.float32)
-    #     triangles = triangles.astype(np.int32)
-
-    #     ### visibility test.
-    #     if dataset is not None:
-    #         visibility_mask = self.mark_unseen_triangles(vertices, triangles, dataset.mvps, dataset.H, dataset.W).cpu().numpy()
-    #         vertices, triangles = remove_masked_trigs(vertices, triangles, visibility_mask, dilation=self.opt.visibility_mask_dilation)
-
-    #     ### reduce floaters by post-processing...
-    #     vertices, triangles = clean_mesh(vertices, triangles, min_f=self.opt.clean_min_f, min_d=self.opt.clean_min_d, repair=True, remesh=False)
-        
-    #     ### decimation
-    #     if decimate_target > 0 and triangles.shape[0] > decimate_target:
-    #         vertices, triangles = decimate_mesh(vertices, triangles, decimate_target)
-
-    #     mesh = trimesh.Trimesh(vertices, triangles, process=False)
-    #     mesh.export(os.path.join(save_path, f'mesh_0.ply'))
-
-    #     # for the outer mesh [1, inf]
-    #     if self.bound > 1:
-
-    #         reso = self.grid_size
-    #         target_reso = self.opt.env_reso
-    #         decimate_target //= 2 # empirical...
-
-    #         if self.cuda_ray:
-    #             all_indices = torch.arange(reso**3, device=device, dtype=torch.int)
-    #             all_coords = raymarching.morton3D_invert(all_indices).cpu().numpy()
-
-    #         # for each cas >= 1
-    #         for cas in range(1, self.cascade):
-    #             bound = min(2 ** cas, self.bound)
-    #             half_grid_size = bound / target_reso
-
-    #             # remap from density_grid
-    #             occ = torch.zeros([reso] * 3, dtype=torch.float32, device=device)
-    #             if self.cuda_ray:
-    #                 occ[tuple(all_coords.T)] = self.density_grid[cas]
-    #             else:
-    #                 # query
-    #                 X = torch.linspace(-bound, bound, reso).split(S)
-    #                 Y = torch.linspace(-bound, bound, reso).split(S)
-    #                 Z = torch.linspace(-bound, bound, reso).split(S)
-
-    #                 for xi, xs in enumerate(X):
-    #                     for yi, ys in enumerate(Y):
-    #                         for zi, zs in enumerate(Z):
-    #                             xx, yy, zz = custom_meshgrid(xs, ys, zs)
-    #                             pts = torch.cat([xx.reshape(-1, 1), yy.reshape(-1, 1), zz.reshape(-1, 1)], dim=-1) # [S, 3]
-    #                             with torch.cuda.amp.autocast(enabled=self.opt.fp16):
-    #                                 val = self.density(pts.to(device))['sigma'].reshape(len(xs), len(ys), len(zs)) # [S, 1] --> [x, y, z]
-    #                             occ[xi * S: xi * S + len(xs), yi * S: yi * S + len(ys), zi * S: zi * S + len(zs)] = val
-
-    #             # interpolate the occ grid to desired resolution to control mesh size...
-    #             occ = F.interpolate(occ.unsqueeze(0).unsqueeze(0), [target_reso] * 3, mode='trilinear').squeeze(0).squeeze(0)
-    #             occ = torch.nan_to_num(occ, 0)
-    #             occ = (occ > density_thresh).cpu().numpy()
-
-    #             vertices_out, triangles_out = mcubes.marching_cubes(occ, 0.5)
-
-    #             vertices_out = vertices_out / (target_reso - 1.0) * 2 - 1 # range in [-1, 1]
-
-    #             # remove the center (already covered by previous cascades)
-    #             _r = 0.45
-    #             vertices_out, triangles_out = remove_selected_verts(vertices_out, triangles_out, f'(x <= {_r}) && (x >= -{_r}) && (y <= {_r}) && (y >= -{_r}) && (z <= {_r} ) && (z >= -{_r})')
-
-    #             if vertices_out.shape[0] == 0: 
-    #                 print(f'[WARN] empty mesh at cas {cas}, consider reducing --bound')
-    #                 continue
-
-    #             vertices_out = vertices_out * (bound - half_grid_size)
-
-    #             # remove the out-of-AABB region
-    #             xmn, ymn, zmn, xmx, ymx, zmx = self.aabb_train.cpu().numpy().tolist()
-    #             xmn += half_grid_size
-    #             ymn += half_grid_size
-    #             zmn += half_grid_size
-    #             xmx -= half_grid_size
-    #             ymx -= half_grid_size
-    #             zmx -= half_grid_size
-    #             vertices_out, triangles_out = remove_selected_verts(vertices_out, triangles_out, f'(x <= {xmn}) || (x >= {xmx}) || (y <= {ymn}) || (y >= {ymx}) || (z <= {zmn} ) || (z >= {zmx})')
-
-    #             # clean mesh
-    #             vertices_out, triangles_out = clean_mesh(vertices_out, triangles_out, min_f=self.opt.clean_min_f, min_d=self.opt.clean_min_d, repair=False, remesh=False)
-
-    #             if vertices_out.shape[0] == 0: 
-    #                 print(f'[WARN] empty mesh at cas {cas}, consider reducing --bound')
-    #                 continue
-
-    #             # decimate
-    #             if decimate_target > 0 and triangles_out.shape[0] > decimate_target:
-    #                 vertices_out, triangles_out = decimate_mesh(vertices_out, triangles_out, decimate_target, optimalplacement=False)
-
-    #             vertices_out = vertices_out.astype(np.float32)
-    #             triangles_out = triangles_out.astype(np.int32)
-
-    #             print(f'[INFO] exporting outer mesh at cas {cas}, v = {vertices_out.shape}, f = {triangles_out.shape}')
-        
-    #             if dataset is not None:
-    #                 visibility_mask = self.mark_unseen_triangles(vertices_out, triangles_out, dataset.mvps, dataset.H, dataset.W).cpu().numpy()
-    #                 vertices_out, triangles_out = remove_masked_trigs(vertices_out, triangles_out, visibility_mask, dilation=self.opt.visibility_mask_dilation)
-                
-    #             if self.opt.contract:
-    #                 vertices_out = uncontract(torch.from_numpy(vertices_out)).cpu().numpy()
-                
-    #             mesh_out = trimesh.Trimesh(vertices_out, triangles_out, process=False) # important, process=True leads to seg fault...
-    #             mesh_out.export(os.path.join(save_path, f'mesh_{cas}.ply'))
-
-    def render(self, rays_o, rays_d, **kwargs):
+    def render(self, rays_o, rays_d, cam_near_far=None, **kwargs):
         
         if self.cuda_ray:
             return self.run_cuda(rays_o, rays_d, **kwargs)
@@ -357,7 +207,14 @@ class NeRFRenderer(nn.Module):
             results = {}
             while head < N:
                 tail = min(head + self.opt.max_ray_batch, N)
-                results_ = self.run(rays_o[head:tail], rays_d[head:tail], **kwargs)
+
+                if cam_near_far is None:
+                    results_ = self.run(rays_o[head:tail], rays_d[head:tail], cam_near_far=None, **kwargs)
+                elif cam_near_far.shape[0] == 1:
+                    results_ = self.run(rays_o[head:tail], rays_d[head:tail], cam_near_far=cam_near_far, **kwargs)
+                else:
+                    results_ = self.run(rays_o[head:tail], rays_d[head:tail], cam_near_far=cam_near_far[head:tail], **kwargs)
+
                 for k, v in results_.items():
                     if k not in results:
                         results[k] = torch.empty(N, *v.shape[1:], device=device)
@@ -579,44 +436,7 @@ class NeRFRenderer(nn.Module):
 
         return results
 
-    @torch.no_grad()
-    def mark_unseen_triangles(self, vertices, triangles, mvps, H, W):
-        # vertices: coords in world system
-        # mvps: [B, 4, 4]
-        device = self.aabb_train.device
-
-        if isinstance(vertices, np.ndarray):
-            vertices = torch.from_numpy(vertices).contiguous().float().to(device)
-        
-        if isinstance(triangles, np.ndarray):
-            triangles = torch.from_numpy(triangles).contiguous().int().to(device)
-
-        mask = torch.zeros_like(triangles[:, 0]) # [M,], for face.
-
-        import nvdiffrast.torch as dr
-        glctx = dr.RasterizeGLContext(output_db=False)
-
-        for mvp in tqdm.tqdm(mvps):
-
-            vertices_clip = torch.matmul(F.pad(vertices, pad=(0, 1), mode='constant', value=1.0), torch.transpose(mvp.to(device), 0, 1)).float().unsqueeze(0) # [1, N, 4]
-
-            # ENHANCE: lower resolution since we don't need that high?
-            rast, _ = dr.rasterize(glctx, vertices_clip, triangles, (H, W)) # [1, H, W, 4]
-
-            # collect the triangle_id (it is offseted by 1)
-            trig_id = rast[..., -1].long().view(-1) - 1
-            
-            # no need to accumulate, just a 0/1 mask.
-            mask[trig_id] += 1 # wrong for duplicated indices, but faster.
-            # mask.index_put_((trig_id,), torch.ones(trig_id.shape[0], device=device, dtype=mask.dtype), accumulate=True)
-
-        mask = (mask == 0) # unseen faces by all cameras
-
-        print(f'[mark unseen trigs] {mask.sum()} from {mask.shape[0]}')
-        
-        return mask # [N]
-
-
+   
     @torch.no_grad()
     def mark_untrained_grid(self, dataset, S=64):
         

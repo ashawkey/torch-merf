@@ -17,7 +17,7 @@ if __name__ == '__main__':
     parser.add_argument('--fast_baking', action='store_true', help="faster baking at the cost of maybe missing blocks at background")
     
     ### model options
-    parser.add_argument('--backbone', type=str, default='default', choices=['default', 'linear'], help="backbone type")
+    parser.add_argument('--backbone', type=str, default='default', choices=['default', 'linear', 'dense'], help="backbone type")
     parser.add_argument('--use_grid', type=int, default=1)
     parser.add_argument('--use_triplane', type=int, default=1)
 
@@ -49,8 +49,9 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, default=1e-3, help="initial learning rate")
     parser.add_argument('--cuda_ray', action='store_true', help="use CUDA raymarching instead of pytorch")
     parser.add_argument('--max_steps', type=int, default=1024, help="max num steps sampled per ray (only valid when using --cuda_ray)")
-    parser.add_argument('--num_steps', type=int, nargs='*', default=[256, 96, 48], help="num steps sampled per ray for each proposal level (only valid when NOT using --cuda_ray)")
+    parser.add_argument('--num_steps', type=int, nargs='*', default=[128, 64, 32], help="num steps sampled per ray for each proposal level (only valid when NOT using --cuda_ray)")
     parser.add_argument('--contract', action='store_true', help="apply spatial contraction as in mip-nerf 360, only work for bound > 1, will override bound to 2.")
+    parser.add_argument('--enable_dense_depth', action='store_true', help="dense depth supervision")
     parser.add_argument('--background', type=str, default='random', choices=['white', 'random', 'last_sample'], help="training background mode")
 
     parser.add_argument('--update_extra_interval', type=int, default=16, help="iter interval to update extra status (only valid when using --cuda_ray)")
@@ -59,7 +60,7 @@ if __name__ == '__main__':
     parser.add_argument('--mark_untrained', action='store_true', help="mark_untrained grid")
     parser.add_argument('--dt_gamma', type=float, default=1/256, help="dt_gamma (>=0) for adaptive ray marching. set to 0 to disable, >0 to accelerate rendering (but usually with worse quality)")
     parser.add_argument('--density_thresh', type=float, default=10, help="threshold for density grid to be occupied")
-    parser.add_argument('--diffuse_step', type=int, default=1000, help="training iters that only trains diffuse color for better initialization")
+    parser.add_argument('--diffuse_step', type=int, default=0, help="training iters that only trains diffuse color for better initialization")
     
     # batch size related
     parser.add_argument('--num_rays', type=int, default=4096, help="num rays sampled per image for each training step")
@@ -72,6 +73,7 @@ if __name__ == '__main__':
     parser.add_argument('--lambda_proposal', type=float, default=1, help="loss scale (only for non-cuda-ray mode)")
     parser.add_argument('--lambda_distort', type=float, default=0.01, help="loss scale (only for non-cuda-ray mode)")
     parser.add_argument('--lambda_specular', type=float, default=1e-5, help="loss scale")
+    parser.add_argument('--lambda_depth', type=float, default=0.1, help="loss scale")
 
     ### GUI options
     parser.add_argument('--vis_pose', action='store_true', help="visualize the poses")
@@ -110,6 +112,8 @@ if __name__ == '__main__':
     
     if opt.backbone == 'linear':
         from nerf.network_linear import NeRFNetwork
+    elif opt.backbone == 'dense':
+        from nerf.network_dense import NeRFNetwork
     else:
         from nerf.network import NeRFNetwork
         
