@@ -653,7 +653,7 @@ class Trainer(object):
             'grid_height': LS,
             'grid_depth': LS,
             'slice_depth': 1,
-            'worldspace_T_opengl': [[-1, 0, 0, 0], [0, 0, 1, 0], [0, 1, 0, 0], [0, 0, 0, 1]],
+            'worldspace_T_opengl': [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
             'min_x': -bound,
             'min_y': -bound,
             'min_z': -bound,
