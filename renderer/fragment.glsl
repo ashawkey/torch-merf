@@ -498,7 +498,7 @@ void main() {
     // We are in occupied space
     // compute grid positions for the sparse 3D grid and on the triplane planes
 #ifdef USE_SPARSE_GRID
-    vec3 posSparseGrid = (z - minPosition) / voxelSize - 0.5;
+    vec3 posSparseGrid = (z - minPosition) / voxelSize;
 #endif
 #ifdef USE_TRIPLANE
     vec3 posTriplaneGrid = (z - minPosition) / voxelSizeTriplane;
