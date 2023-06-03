@@ -291,7 +291,8 @@ class NeRFRenderer(nn.Module):
                 dirs = dirs / torch.norm(dirs, dim=-1, keepdim=True)
                 outputs = self(xyzs, dirs, shading=shading)
                 sigmas = outputs['sigma']
-                rgbs = outputs['color']
+                diffuse = outputs['diffuse']
+                specular = outputs['specular']
 
             # sigmas to weights
             deltas = (real_bins[..., 1:] - real_bins[..., :-1]) # [N, T]
@@ -317,13 +318,23 @@ class NeRFRenderer(nn.Module):
            results['xyzs'] = xyzs # [N, T, 3] in [-2, 2]
            results['weights'] = weights # [N, T]
            results['alphas'] = alphas # [N, T]
-           results['rgbs'] = rgbs
+           # results['rgbs'] = rgbs
            return results
 
         # composite
         weights_sum = torch.sum(weights, dim=-1) # [N]
         depth = torch.sum(weights * rays_t, dim=-1) # [N]
-        image = torch.sum(weights.unsqueeze(-1) * rgbs, dim=-2) # [N, 3]
+
+        diffuse = torch.sum(weights.unsqueeze(-1) * diffuse, dim=-2) # [N, 3]
+        if shading == 'diffuse':
+            image = diffuse
+        else: 
+            specular = torch.sum(weights.unsqueeze(-1) * specular, dim=-2)
+            specular = torch.sigmoid(self.view_mlp(specular))
+            if shading == 'specular':
+                image = specular
+            else: # full
+                image = (diffuse + specular).clamp(0, 1)
 
         # extra results
         if self.training:

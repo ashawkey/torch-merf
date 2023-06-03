@@ -128,7 +128,7 @@ class NeRFNetwork(NeRFRenderer):
         # x: in real value, to be quantized in to [-m, m]
         x = torch.sigmoid(x)
 
-        if baking: return 255 * x
+        if baking: return torch.floor(255 * x + 0.5)
         
         x = x + (torch.floor(255 * x + 0.5) / 255 - x).detach()
         x = 2 * m * x - m
@@ -146,19 +146,13 @@ class NeRFNetwork(NeRFRenderer):
 
         d = self.view_encoder(d)
         if shading == 'diffuse':
-            color = diffuse
             specular = None
         else: 
-            specular = self.view_mlp(torch.cat([diffuse, f_specular, d], dim=-1))
-            specular = torch.sigmoid(specular)
-            if shading == 'specular':
-                color = specular
-            else: # full
-                color = (specular + diffuse).clamp(0, 1) # specular + albedo
+            specular = torch.cat([diffuse, f_specular, d], dim=-1)
 
         results = {
             'sigma': sigma,
-            'color': color,
+            'diffuse': diffuse,
             'specular': specular,
         }
 
