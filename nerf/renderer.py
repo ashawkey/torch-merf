@@ -196,9 +196,9 @@ class NeRFRenderer(nn.Module):
     def render(self, rays_o, rays_d, cam_near_far=None, **kwargs):
         
         if self.cuda_ray:
-            return self.run_cuda(rays_o, rays_d, **kwargs)
+            return self.run_cuda(rays_o, rays_d, cam_near_far=cam_near_far, **kwargs)
         elif self.training:
-            return self.run(rays_o, rays_d, **kwargs)
+            return self.run(rays_o, rays_d, cam_near_far=cam_near_far, **kwargs)
         else: # staged inference
             N = rays_o.shape[0]
             device = rays_o.device
