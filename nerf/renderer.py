@@ -125,8 +125,8 @@ def near_far_from_aabb(rays_o, rays_d, aabb, min_near=0.05):
     # bound: int, radius for ball or half-edge-length for cube
     # return near [N, 1], far [N, 1]
 
-    tmin = (aabb[:3] - rays_o) / (rays_d + 1e-15) # [N, 3]
-    tmax = (aabb[3:] - rays_o) / (rays_d + 1e-15)
+    tmin = ((aabb[:3] - rays_o) / (rays_d + 1e-15)).detach() # [N, 3]
+    tmax = ((aabb[3:] - rays_o) / (rays_d + 1e-15)).detach()
     near = torch.where(tmin < tmax, tmin, tmax).amax(dim=-1, keepdim=True)
     far = torch.where(tmin > tmax, tmin, tmax).amin(dim=-1, keepdim=True)
     # if far < near, means no intersection, set both near and far to inf (1e9 here)
@@ -196,9 +196,9 @@ class NeRFRenderer(nn.Module):
     def render(self, rays_o, rays_d, cam_near_far=None, **kwargs):
         
         if self.cuda_ray:
-            return self.run_cuda(rays_o, rays_d, **kwargs)
+            return self.run_cuda(rays_o, rays_d, cam_near_far=cam_near_far, **kwargs)
         elif self.training:
-            return self.run(rays_o, rays_d, **kwargs)
+            return self.run(rays_o, rays_d, cam_near_far=cam_near_far, **kwargs)
         else: # staged inference
             N = rays_o.shape[0]
             device = rays_o.device
